@@ -1,2 +1,5 @@
 data/
 previous_code/
+build/
+.DS_Store
+*.ipynb
