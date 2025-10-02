@@ -3,3 +3,10 @@ previous_code/
 build/
 .DS_Store
 *.ipynb
+.vscode/
+**/__pycache__/
+**/*.pyc
+*.json
+*.txt
+test*
+*.tsv
