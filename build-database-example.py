@@ -13,7 +13,7 @@ ctypes.CDLL(os.path.join(HOME, "pgsql/lib/libpq.so"), mode=ctypes.RTLD_GLOBAL)
 # 再加载 libpqxx
 ctypes.CDLL(os.path.join(HOME, "pgsql/lib/libpqxx.so"), mode=ctypes.RTLD_GLOBAL)
 
-from src.pmcad.core import find_files, insert_files_to_pgdb, init_pgdb, remove_pgdb
+from src.pmcad.core import find_files, insert_files_to_pgdb, init_pgdb, remove_pgdb, pg_exec
 
 port = "55433"
 pgbinpath = os.path.join(HOME, "pgsql/bin")
@@ -43,3 +43,12 @@ print(f"START:{len(filelist)}")
 insert_files_to_pgdb(filelist, "final_file", dbpath, verbose=True)
 
 # %%
+# 查看有哪些表格
+sql = "SELECT table_name FROM information_schema.tables WHERE table_schema='public';"
+output = pg_exec(dbpath, sql)
+print("Tables in database:\n", output)
+
+# 查看 final_file 表前 5 行
+sql = "SELECT * FROM final_file LIMIT 5;"
+output = pg_exec(dbpath, sql)
+print("前 5 行数据:\n", output)
