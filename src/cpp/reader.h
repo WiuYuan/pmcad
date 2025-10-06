@@ -4,7 +4,7 @@
 
 namespace pmcad {
 
-class TSVReader {
+class Reader {
 public:
     static std::vector<std::vector<std::string> > read_tsv_file(
         const std::string& filename);
@@ -25,6 +25,14 @@ public:
     static std::vector<std::string> find_files(
         const std::string& foldername,
         const std::string& pattern);
+
+    static void insert_files_to_pgdb(
+        const std::vector<std::string>& filelist,
+        const std::string& table_name,
+        const std::string& dbname, const std::string& user,
+        const std::string& password,
+        const std::string& host,
+        const std::string& port, bool verbose);
 };
 
 } // namespace pmcad

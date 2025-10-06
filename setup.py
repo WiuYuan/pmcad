@@ -15,7 +15,12 @@ ext_modules = [
         include_dirs=[
             "src/cpp",
             pybind11.get_include(),
+            os.path.expanduser("~/pgsql/include"),
         ],
+        libraries=["pqxx", "pq"],
+        library_dirs=[
+            os.path.expanduser("~/pgsql/lib")
+        ],  # libpqxx/libpq library path
         language="c++",
         extra_compile_args=["-std=c++17", "-O3", "-fPIC"],
     ),
