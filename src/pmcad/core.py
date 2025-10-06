@@ -81,7 +81,22 @@ def match_reference(
     return _match_reference(query, reference, verbose)
 
 
+
 def find_files(foldername: str, pattern: str) -> List[str]:
+    """
+    在指定文件夹及其子文件夹中查找所有匹配给定正则表达式的文件。
+
+    参数:
+        foldername (str): 要搜索的根文件夹路径。
+        pattern (str): 用于匹配文件名的正则表达式。
+
+    返回:
+        List[str]: 返回匹配文件的完整路径列表。
+
+    示例:
+        >>> find_files("/home/user/data", r"^final_file_\d+\.tsv$")
+        ['/home/user/data/final_file_1.tsv', '/home/user/data/final_file_2.tsv']
+    """
     return _find_files(foldername, pattern)
 
 

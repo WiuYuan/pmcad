@@ -10,3 +10,4 @@ build/
 *.txt
 test*
 *.tsv
+_*
