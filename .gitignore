@@ -8,6 +8,9 @@ build/
 **/*.pyc
 *.json
 *.txt
-test*
 *.tsv
 _*
+*.log
+*.csv
+*.jsonl
+config*

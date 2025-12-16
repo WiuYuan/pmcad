@@ -11,13 +11,14 @@ ext_modules = [
             "src/cpp/bindings.cpp",
             "src/cpp/reader.cpp",
             "src/cpp/gene_match.cpp",
+            "src/cpp/uniprot_importer.cpp",
         ],
         include_dirs=[
             "src/cpp",
             pybind11.get_include(),
             os.path.expanduser("~/pgsql/include"),
         ],
-        libraries=["pqxx", "pq"],
+        libraries=["pqxx", "pq", "z"],
         library_dirs=[
             os.path.expanduser("~/pgsql/lib")
         ],  # libpqxx/libpq library path

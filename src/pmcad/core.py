@@ -4,11 +4,13 @@ from ._core import read_multi_tsv
 from ._core import find_files as _find_files
 from ._core import match_reference as _match_reference
 from ._core import insert_files_to_pgdb as _insert_files_to_pgdb
+from ._core import UniprotImporter
 import os
 import subprocess
 import time
 import json
 import signal
+import gzip
 
 
 def read_tsv_files(filelist: List[str]) -> pd.DataFrame:
@@ -81,7 +83,6 @@ def match_reference(
     return _match_reference(query, reference, verbose)
 
 
-
 def find_files(foldername: str, pattern: str) -> List[str]:
     """
     在指定文件夹及其子文件夹中查找所有匹配给定正则表达式的文件。
@@ -100,10 +101,12 @@ def find_files(foldername: str, pattern: str) -> List[str]:
     return _find_files(foldername, pattern)
 
 
-def insert_files_to_pgdb(filelist: List[str], table_name: str, dbpath: str, verbose: bool = False):
+def insert_files_to_pgdb(
+    filelist: List[str], table_name: str, dbpath: str, verbose: bool = False
+):
     """
     将文件列表插入 PostgreSQL 数据库表中，直接通过 dbpath 自动获取连接信息。
-    
+
     参数:
         filelist (List[str]): 文件路径列表
         table_name (str): 数据库表名
@@ -131,10 +134,19 @@ def insert_files_to_pgdb(filelist: List[str], table_name: str, dbpath: str, verb
         password=password,
         host=host,
         port=port,
-        verbose=verbose
+        verbose=verbose,
     )
 
-def init_pgdb(dbpath, pgbinpath, admin_user="postgres", admin_password="postgres", host="localhost", port=5432, wait_seconds=2):
+
+def init_pgdb(
+    dbpath,
+    pgbinpath,
+    admin_user="postgres",
+    admin_password="postgres",
+    host="localhost",
+    port=5432,
+    wait_seconds=2,
+):
     """
     初始化 PostgreSQL 数据库并创建管理员用户（可选默认账号密码）
 
@@ -162,13 +174,26 @@ def init_pgdb(dbpath, pgbinpath, admin_user="postgres", admin_password="postgres
 
     # 1️⃣ 初始化数据库（如果还没有 PG_VERSION）
     if not os.path.exists(os.path.join(data_dir, "PG_VERSION")):
-        subprocess.run([initdb_path, "-D", data_dir, "--username", admin_user], check=True)
-        print(f"Initialized PostgreSQL data directory at {data_dir} with admin user '{admin_user}'")
+        subprocess.run(
+            [initdb_path, "-D", data_dir, "--username", admin_user], check=True
+        )
+        print(
+            f"Initialized PostgreSQL data directory at {data_dir} with admin user '{admin_user}'"
+        )
 
     # 2️⃣ 启动数据库
     subprocess.run(
-        [pg_ctl_path, "-D", data_dir, "-o", f"-p {port}", "-l", os.path.join(data_dir, "logfile"), "start"],
-        check=True
+        [
+            pg_ctl_path,
+            "-D",
+            data_dir,
+            "-o",
+            f"-p {port}",
+            "-l",
+            os.path.join(data_dir, "logfile"),
+            "start",
+        ],
+        check=True,
     )
     print("PostgreSQL server starting...")
     time.sleep(wait_seconds)
@@ -176,9 +201,19 @@ def init_pgdb(dbpath, pgbinpath, admin_user="postgres", admin_password="postgres
     # 3️⃣ 设置管理员密码
     set_password_sql = f"ALTER USER {admin_user} WITH PASSWORD '{admin_password}';"
     subprocess.run(
-        [psql_path, "-U", admin_user, "-p", str(port), "-d", dbname, "-c", set_password_sql],
+        [
+            psql_path,
+            "-U",
+            admin_user,
+            "-p",
+            str(port),
+            "-d",
+            dbname,
+            "-c",
+            set_password_sql,
+        ],
         check=True,
-        env={**os.environ, "PGPASSWORD": ""}
+        env={**os.environ, "PGPASSWORD": ""},
     )
 
     print(f"Admin user '{admin_user}' ready on port {port}")
@@ -191,7 +226,7 @@ def init_pgdb(dbpath, pgbinpath, admin_user="postgres", admin_password="postgres
         "password": admin_password,
         "host": host,
         "port": port,
-        "data_dir": data_dir
+        "data_dir": data_dir,
     }
     info_path = os.path.join(dbpath, "database.info")
     with open(info_path, "w") as f:
@@ -199,6 +234,7 @@ def init_pgdb(dbpath, pgbinpath, admin_user="postgres", admin_password="postgres
     print(f"Database connection info saved to {info_path}")
 
     return db_info
+
 
 def remove_pgdb(dbpath):
     """
@@ -243,7 +279,8 @@ def remove_pgdb(dbpath):
     print(f"Deleted database info file: {info_file}")
 
     print(f"Database at {dbpath} removed and port {port} freed.")
-    
+
+
 def pg_exec(dbpath, sql=None, interactive=False):
     """
     在 Python 中调用 PostgreSQL 命令行工具 (psql)
@@ -271,10 +308,14 @@ def pg_exec(dbpath, sql=None, interactive=False):
 
     cmd = [
         psql_path,
-        "-U", db_info["user"],
-        "-d", db_info["dbname"],
-        "-h", db_info["host"],
-        "-p", str(db_info["port"]),
+        "-U",
+        db_info["user"],
+        "-d",
+        db_info["dbname"],
+        "-h",
+        db_info["host"],
+        "-p",
+        str(db_info["port"]),
     ]
 
     # 若 interactive=True，则直接进入 psql 终端
@@ -292,3 +333,336 @@ def pg_exec(dbpath, sql=None, interactive=False):
         return result.stdout.strip()
 
     raise ValueError("Must provide either sql command or set interactive=True")
+
+
+def import_gz_table(dbpath, gz_file, table_name, header=None, pvpath=None):
+    """
+    将 gzip 压缩的表格文件导入 PostgreSQL 数据库，并显示字节进度。
+
+    自动读取表头、自动建表（text 类型）、去掉 # 字符。
+
+    参数:
+        dbpath (str): 包含 database.info 的数据库路径
+        gz_file (str): 要导入的 .gz 文件路径
+        table_name (str): PostgreSQL 中目标表名
+        pvpath (str): pv 命令路径，默认 None
+
+    返回:
+        None
+    """
+    info_file = os.path.join(dbpath, "database.info")
+    if not os.path.exists(info_file):
+        raise FileNotFoundError(f"No database.info found at {info_file}")
+
+    # 读取数据库连接信息
+    with open(info_file, "r") as f:
+        db_info = json.load(f)
+
+    psql_path = os.path.join(db_info["pgbinpath"], "psql")
+    env = {**os.environ, "PGPASSWORD": db_info["password"]}
+
+    # 读取表头，自动识别分隔符
+    with gzip.open(gz_file, "rt") as f:
+        first_line = f.readline().strip()
+        if "\t" in first_line:
+            delimiter = "\t"
+        elif "," in first_line:
+            delimiter = ","
+        else:
+            delimiter = "\t"  # 默认
+        columns = [col.strip().lstrip("#") for col in first_line.split(delimiter)]
+
+    if header is not None:
+        columns = list(header)
+        skip_cmd = "cat"
+    else:
+        skip_cmd = "tail -n +2"
+        
+    # 生成建表 SQL（所有列 text 类型）
+    col_defs = ",\n  ".join([f'"{col}" text' for col in columns])
+    create_sql = f"CREATE TABLE IF NOT EXISTS {table_name} (\n  {col_defs}\n);"
+
+    print(f"Creating table {table_name} if not exists...")
+    subprocess.run(
+        [
+            psql_path,
+            "-U",
+            db_info["user"],
+            "-d",
+            db_info["dbname"],
+            "-h",
+            db_info["host"],
+            "-p",
+            str(db_info["port"]),
+            "-c",
+            create_sql,
+        ],
+        env=env,
+        check=True,
+    )
+
+    # 构造 \copy 命令
+    copy_cmd = (
+        f"\\copy {table_name} FROM STDIN WITH (FORMAT text, DELIMITER E'{delimiter}')"
+    )
+
+    # 使用 pv + gunzip 导入
+    # full_cmd = f"gunzip | sed 's/\\\\//g' | {psql_path} -U {db_info['user']} -d {db_info['dbname']} -h {db_info['host']} -p {db_info['port']} -c \"{copy_cmd}\""
+
+    if pvpath:
+        full_cmd = (
+            f"{pvpath} {gz_file} | gunzip | {skip_cmd} | sed 's/\\\\//g' | "
+            f"{psql_path} -U {db_info['user']} -d {db_info['dbname']} "
+            f"-h {db_info['host']} -p {db_info['port']} -c \"{copy_cmd}\""
+        )
+    else:
+        full_cmd = (
+            f"gunzip -c {gz_file} | {skip_cmd} | sed 's/\\\\//g' | "
+            f"{psql_path} -U {db_info['user']} -d {db_info['dbname']} "
+            f"-h {db_info['host']} -p {db_info['port']} -c \"{copy_cmd}\""
+        )
+
+    print(f"Importing {gz_file} into table {table_name} with progress bar...\n")
+    result = subprocess.run(full_cmd, shell=True, env=env)
+    if result.returncode != 0:
+        raise RuntimeError(f"Import failed for {gz_file}")
+    print("Import completed successfully.")
+
+def pg_start(dbpath):
+    """
+    启动 PostgreSQL 数据库实例（极简后台版，启动前判断是否已运行）
+    """
+    info_file = os.path.join(dbpath, "database.info")
+    if not os.path.exists(info_file):
+        raise FileNotFoundError(f"No database.info found at {info_file}")
+
+    with open(info_file, "r") as f:
+        db_info = json.load(f)
+
+    pgbin = db_info.get("pgbinpath")
+    datadir = db_info.get("data_dir")
+    port = str(db_info.get("port", 5432))
+
+    if not pgbin or not datadir:
+        raise ValueError("database.info 必须包含 pgbinpath 和 data_dir 字段")
+
+    pg_ctl = os.path.join(pgbin, "pg_ctl")
+    logfile = os.path.join(dbpath, "pg.log")
+
+    # === 1. 检查是否已启动 ===
+    status_cmd = [pg_ctl, "status", "-D", datadir]
+    status = subprocess.run(status_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    if "server is running" in status.stdout:
+        print("✅ PostgreSQL 已在运行，跳过启动。")
+        return
+
+    # === 2. 构造启动命令 ===
+    cmd = [
+        pg_ctl,
+        "-D", datadir,
+        "-l", logfile,
+        "-o", f"-p {port}",
+        "start"
+    ]
+
+    # print(" ".join(cmd))
+
+    # === 3. 后台启动 ===
+    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    print("🚀 PostgreSQL 启动命令已执行（后台运行中）")
+
+def pg_stop(dbpath):
+    """
+    关闭 PostgreSQL 数据库实例（极简后台版，关闭前判断是否已运行）
+    """
+    info_file = os.path.join(dbpath, "database.info")
+    if not os.path.exists(info_file):
+        raise FileNotFoundError(f"No database.info found at {info_file}")
+
+    with open(info_file, "r") as f:
+        db_info = json.load(f)
+
+    pgbin = db_info.get("pgbinpath")
+    datadir = db_info.get("data_dir")
+
+    if not pgbin or not datadir:
+        raise ValueError("database.info 必须包含 pgbinpath 和 data_dir 字段")
+
+    pg_ctl = os.path.join(pgbin, "pg_ctl")
+
+    # === 1. 检查是否已启动 ===
+    status_cmd = [pg_ctl, "status", "-D", datadir]
+    status = subprocess.run(status_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    if "server is running" not in status.stdout:
+        print("⚪ PostgreSQL 当前未运行，跳过关闭。")
+        return
+
+    # === 2. 构造关闭命令 ===
+    cmd = [
+        pg_ctl,
+        "-D", datadir,
+        "stop"
+    ]
+
+    print(" ".join(cmd))
+
+    # === 3. 后台关闭 ===
+    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    print("🛑 PostgreSQL 关闭命令已执行（后台运行中）")
+    
+def import_uniprot_ft(
+    dbpath: str,
+    gz_path: str,
+    table_name: str = "uniprot_features",
+    batch_commit: int = 200000,
+    verbose: bool = True,
+):
+    """
+    从 UniProt .dat.gz 文件中解析 Feature Table (FT) 区域并导入 PostgreSQL。
+    （基于 C++ 高速解析与 COPY 模式，支持边解压边导入）
+
+    参数:
+        dbpath (str): 包含 database.info 的数据库目录。
+        gz_path (str): UniProt .dat.gz 文件路径。
+        table_name (str): 导入的目标表名，默认为 "uniprot_features"。
+        batch_commit (int): 每次提交事务的记录数（默认 200,000）。
+        verbose (bool): 是否显示进度条（默认 True）。
+
+    返回:
+        None
+    """
+    info_file = os.path.join(dbpath, "database.info")
+    if not os.path.exists(info_file):
+        raise FileNotFoundError(f"No database.info found at {info_file}")
+
+    with open(info_file, "r") as f:
+        db_info = json.load(f)
+
+    dbname = db_info["dbname"]
+    user = db_info["user"]
+    password = db_info["password"]
+    host = db_info.get("host", "localhost")
+    port = str(db_info.get("port", 5432))
+
+    print(f"\n🚀 Importing UniProt FT features into PostgreSQL table '{table_name}' ...\n")
+    start = time.time()
+
+    UniprotImporter.ft_stream_parse_and_copy(
+        gz_path=gz_path,
+        table_name=table_name,
+        dbname=dbname,
+        user=user,
+        password=password,
+        host=host,
+        port=port,
+        batch_commit=batch_commit,
+        verbose=verbose,
+    )
+
+    print(f"\n✅ Import finished in {time.time() - start:.2f} seconds.")
+    
+            
+def import_uniprot_dr(
+    dbpath: str,
+    gz_path: str,
+    table_name: str = "uniprot_features",
+    batch_commit: int = 200000,
+    verbose: bool = True,
+):
+    """
+    从 UniProt .dat.gz 文件中解析 Feature Table (FT) 区域并导入 PostgreSQL。
+    （基于 C++ 高速解析与 COPY 模式，支持边解压边导入）
+
+    参数:
+        dbpath (str): 包含 database.info 的数据库目录。
+        gz_path (str): UniProt .dat.gz 文件路径。
+        table_name (str): 导入的目标表名，默认为 "uniprot_features"。
+        batch_commit (int): 每次提交事务的记录数（默认 200,000）。
+        verbose (bool): 是否显示进度条（默认 True）。
+
+    返回:
+        None
+    """
+    info_file = os.path.join(dbpath, "database.info")
+    if not os.path.exists(info_file):
+        raise FileNotFoundError(f"No database.info found at {info_file}")
+
+    with open(info_file, "r") as f:
+        db_info = json.load(f)
+
+    dbname = db_info["dbname"]
+    user = db_info["user"]
+    password = db_info["password"]
+    host = db_info.get("host", "localhost")
+    port = str(db_info.get("port", 5432))
+
+    print(f"\n🚀 Importing UniProt dr features into PostgreSQL table '{table_name}' ...\n")
+    start = time.time()
+
+    UniprotImporter.dr_stream_parse_and_copy(
+        gz_path=gz_path,
+        table_name=table_name,
+        dbname=dbname,
+        user=user,
+        password=password,
+        host=host,
+        port=port,
+        batch_commit=batch_commit,
+        verbose=verbose,
+    )
+
+    print(f"\n✅ Import finished in {time.time() - start:.2f} seconds.")
+    
+def import_uniprot_sq(
+    dbpath: str,
+    gz_path: str,
+    table_name: str = "uniprot_sequences",
+    batch_commit: int = 20000,
+    verbose: bool = True,
+):
+    """
+    从 UniProt .dat.gz 文件中解析 Sequence (SQ) 区域并导入 PostgreSQL。
+    （基于 C++ 高速解析与 COPY 模式，支持边解压边导入）
+
+    参数:
+        dbpath (str): 包含 database.info 的数据库目录。
+        gz_path (str): UniProt .dat.gz 文件路径。
+        table_name (str): 导入的目标表名，默认为 "uniprot_sequences"。
+        batch_commit (int): 每次提交事务的记录数（默认 20,000）。
+        verbose (bool): 是否显示进度条（默认 True）。
+
+    返回:
+        None
+    """
+
+    info_file = os.path.join(dbpath, "database.info")
+    if not os.path.exists(info_file):
+        raise FileNotFoundError(f"No database.info found at {info_file}")
+
+    with open(info_file, "r") as f:
+        db_info = json.load(f)
+
+    dbname = db_info["dbname"]
+    user = db_info["user"]
+    password = db_info["password"]
+    host = db_info.get("host", "localhost")
+    port = str(db_info.get("port", 5432))
+
+    print(f"\n🚀 Importing UniProt sequence records into PostgreSQL table '{table_name}' ...\n")
+    start = time.time()
+
+    UniprotImporter.sq_stream_parse_and_copy(
+        gz_path=gz_path,
+        table_name=table_name,
+        dbname=dbname,
+        user=user,
+        password=password,
+        host=host,
+        port=port,
+        batch_commit=batch_commit,
+        verbose=verbose,
+    )
+
+    print(f"\n✅ Import finished in {time.time() - start:.2f} seconds.")

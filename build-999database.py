@@ -17,30 +17,23 @@ from src.pmcad.core import find_files, insert_files_to_pgdb, init_pgdb, remove_p
 
 port = "55433"
 pgbinpath = os.path.join(HOME, "pgsql/bin")
-dbpath = os.path.join(HOME, "workspace/pmcdata_pro/database/999_pgdb")
+dbpath = os.path.join(HOME, "/data/wyuan/workspace/pmcdata_pro/database/protease_pgdb")
 
-# %%
-# 第一步：初始化数据库和管理员用户
-# remove_pgdb(dbpath)
-# init_pgdb(
-#     dbpath=dbpath,
-#     pgbinpath=pgbinpath,
-#     port=port
-# )
 
 # %%
 
 # 在workspace/pmcdata_pro/data/999文件夹下所有子文件夹中获取所有final_file_old_999.tsv类型的文件名
 filelist = find_files(
-    os.path.join(HOME, "workspace/pmcdata_pro/data/protease"),
-    r"^ner_gene_(\d+)\.tsv$",
+    os.path.join(HOME, "workspace/pmcdata_pro/data/999"),
+    r"^final_file_old_(\d+)\.tsv$",
 )
 
 # %%
 print(f"START:{len(filelist)}")
+table_name = "final_file_test"
 
 # 把这些文件名的tsv格式文件插入数据库, 表头取第一个文件的表头, 每个文件以\t分隔
-insert_files_to_pgdb(filelist, "ner_gene", dbpath, verbose=True)
+insert_files_to_pgdb(filelist, table_name, dbpath, verbose=True)
 
 # %%
 # 查看有哪些表格
@@ -49,6 +42,6 @@ output = pg_exec(dbpath, sql)
 print("Tables in database:\n", output)
 
 # 查看 final_file 表前 5 行
-sql = "SELECT * FROM ner_gene LIMIT 5;"
+sql = f"SELECT * FROM {table_name} LIMIT 5;"
 output = pg_exec(dbpath, sql)
 print("前 5 行数据:\n", output)

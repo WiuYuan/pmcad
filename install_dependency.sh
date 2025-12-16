@@ -25,3 +25,11 @@ cmake .. \
 
 make -j$(nproc)
 make install
+
+curl -O https://www.ivarch.com/programs/sources/pv-1.7.0.tar.bz2 #need vpn
+tar -xjf pv-1.7.0.tar.bz2
+cd pv-1.7.0
+./configure --prefix=$HOME/local
+make
+make install
+export PATH=$HOME/local/bin:$PATH

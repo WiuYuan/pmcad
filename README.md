@@ -1,26 +1,127 @@
-# PMCAD
+# PMC-AD  
+**Iterative Biomedical Relation Extraction with Structured LLM Inference**
 
-Using article abstract database from pubmed, combined with bioinformatics tools to construct new database
+PMC-AD is a schema-guided framework for **document-level biomedical relation extraction** from the scientific literature.  
+The system leverages large language models (LLMs) as *structured inference engines*, integrating ontology constraints, interleaved memory, and hybrid retrieval (SPLADE + dense embeddings) to extract and normalize relations across sentence boundaries.
 
+Repository: https://github.com/WiuYuan/pmcad
 
-## Install dependency for C++
+---
 
-```{bash}
-bash install_dependency.sh
+## Overview
+
+The rapid growth of biomedical literature poses significant challenges for automated knowledge discovery.  
+Traditional systems (e.g., SYMPLEX, 2022) rely primarily on named entity recognition (NER) and sentence-level co-occurrence assumptions, which do not explicitly extract semantic relations and struggle to aggregate information across sentences.
+
+PMC-AD addresses these limitations by introducing an **iterative, schema-guided extraction pipeline** in which LLMs operate under explicit structural and ontological constraints.
+
+---
+
+## Method: Iterative Relation Extraction
+
+For each PubMed abstract, PMC-AD performs the following steps:
+
+1. **Sentence Segmentation**  
+   Each abstract is split into a sequence of sentences.
+
+2. **Iterative Sentence Loop**  
+   Sentences are processed sequentially. For each sentence, a structured prompt is constructed that includes:
+   - The current sentence
+   - A fixed JSON schema
+   - Ontology constraints (e.g., entity types and relation roles)
+   - An interleaved memory of previously extracted relations
+
+3. **LLM Inference**  
+   The LLM generates candidate relations in a structured JSON format.
+
+4. **Candidate Selection and Normalization**  
+   For each extracted entity, candidate mappings are retrieved using:
+   - **SPLADE sparse retrieval**
+   - **Dense biomedical semantic embeddings**  
+   (top-30 candidates via API-based search)
+
+   A secondary LLM step selects the most appropriate canonical entity (e.g., UniProt, GO, SO, species).
+
+5. **Structured Memory Update**  
+   Validated relations are stored and interleaved into subsequent prompts, enabling document-level context integration.
+
+6. **Relation Graph Construction**  
+   The final output is a document-level relation graph derived from sentence-level inferences.
+
+---
+
+## Unified Relation Schema
+
+All extracted relations conform to a unified JSON schema:
+
+```json
+[
+  {
+    "components": [
+      {
+        "name": "...",
+        "description": "...",
+        "type": "...",
+        "meta": [
+          {
+            "name": "...",
+            "description": "...",
+            "type": "..."
+          }
+        ]
+      }
+    ],
+    "relation": {
+      "name": "...",
+      "description": "..."
+    },
+    "target": [
+      {
+        "name": "...",
+        "description": "...",
+        "type": "...",
+        "meta": []
+      }
+    ],
+    "context": [
+      {
+        "name": "...",
+        "description": "...",
+        "type": "...",
+        "meta": []
+      }
+    ]
+  }
+]
 ```
+This schema enforces:
+- Explicit entity roles (components, target, context)
+- Consistent entity typing (gene, protein, disease, species, GO/SO terms)
+- Structured outputs suitable for downstream knowledge graph construction
 
-## Set up pybind for C++ and python
+## Entity Resolution and Retrieval
 
-```{bash}
-bash build.sh
-```
+After relation extraction, entity normalization is performed via a hybrid retrieval strategy:
+- Sparse retrieval: SPLADE-based lexical-semantic matching
+- Dense retrieval: Biomedical sentence embeddings
+- LLM-based selection: Final disambiguation among retrieved candidates
 
-## database structure
+A final LLM pass filters relations that violate schema or ontology constraints.
 
-Suppose final database in $DATABASEPATH, then $DATABASEPATH/data is the postgresql data base, $DATABASEPATH/database.info store the basic information
+## Evaluation: Best-Match Rank CDF
 
-## insert files into database example
+To assess entity resolution quality, PMC-AD evaluates best-match ranks produced by the LLM:
+- For each entity, the rank of the LLM-selected candidate is recorded.
+- Cumulative distribution functions (CDFs) are computed over ranks.
+- CDFs visualize the proportion of entities whose best match appears within the top-k candidates.
 
-```{python}
-python build-database-example.py
-```
+This evaluation is performed separately for different mapping types (e.g., UniProt, GO, SO, species).
+
+## Current Status and Validation
+
+PMC-AD is an ongoing research effort aimed at scalable, literature-wide biomedical relation extraction beyond task-specific datasets.
+
+Current validation includes:
+- Cross-model agreement analysis:
+Relations generated by DeepSeek are independently verified using GPT-5, with an observed agreement rate of approximately 80%.
+- A manually curated gold-standard dataset is under construction for quantitative evaluation.
