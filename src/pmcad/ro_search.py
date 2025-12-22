@@ -1,39 +1,42 @@
 from src.services.elasticsearch import search_via_curl
 
+
 def search_ro(
     config_path,
     dense_model,
+    splade_model,
     query,
-    index_name="ro_relations",
+    index_name="ro_index",
     k=10,
     vec_topn=200,
+    w_dense=0.5,
+    w_splade=0.5,
     verbose=True,
 ):
     """
-    RO Hybrid search (目前仅 Dense KNN，结构完全对齐 SO search)
+    RO Hybrid search (Dense recall + SPLADE rerank)
+    与 search_so 工程风格完全一致
     """
 
     # ============================================================
     # 1. Dense Recall (KNN)
     # ============================================================
-    qvec_dense = dense_model.encode(
-        query,
-        normalize_embeddings=True
-    ).tolist()
+    qvec_dense = dense_model.encode(query, normalize_embeddings=True).tolist()
 
     knn_body = {
         "size": vec_topn,
         "knn": {
-            "field": "embedding",
+            "field": "vector",
             "query_vector": qvec_dense,
             "k": vec_topn,
             "num_candidates": max(vec_topn * 3, 1000),
         },
         "_source": [
-            "relation_id",
+            "id",
             "label",
-            "desc",
-        ]
+            "text_all",
+            "splade",
+        ],
     }
 
     hits_knn = search_via_curl(config_path, index_name, knn_body)
@@ -41,45 +44,69 @@ def search_ro(
         return []
 
     # ============================================================
-    # 2. Build candidate list（对齐 SO schema）
+    # 2. Build SPLADE query vector
+    # ============================================================
+    sparse_vec = splade_model.encode([query])[0].coalesce()
+    idx = sparse_vec.indices()[0].tolist()
+    val = sparse_vec.values().tolist()
+    tokens = splade_model.tokenizer.convert_ids_to_tokens(idx)
+
+    q_splade = {tok: float(v) for tok, v in zip(tokens, val) if float(v) > 0}
+
+    # ============================================================
+    # 3. Build candidate list（SO schema 对齐）
     # ============================================================
     items = []
     for h in hits_knn:
         src = h["_source"]
-        label = src.get("label", "")
-        desc = src.get("desc", "")
-
-        items.append({
-            "ro_id": src.get("relation_id"),
-            "label": label,
-            "definition": desc,
-            "text_all": f"{label}. {desc}".strip(),
-            "dense": h["_score"],
-            "splade": 0.0,
-            "doc_splade": {},
-            "final": 0.0,
-        })
+        items.append(
+            {
+                "id": src.get("id"),
+                "label": src.get("label", ""),
+                "text_all": src.get("text_all", ""),
+                "dense": h["_score"],
+                "splade": 0.0,
+                "doc_splade": src.get("splade", {}),
+                "final": 0.0,
+            }
+        )
 
     # ============================================================
-    # 3. Normalize + fuse（即使只有 dense，也保持一致）
+    # 4. SPLADE dot-product reranking
+    # ============================================================
+    for it in items:
+        score = 0.0
+        doc_spl = it["doc_splade"]
+        for tok, wq in q_splade.items():
+            wd = doc_spl.get(tok, 0.0)
+            if wd > 0:
+                score += wq * wd
+        it["splade"] = score
+
+    # ============================================================
+    # 5. Normalize + fuse
     # ============================================================
     max_dense = max(it["dense"] for it in items) or 1e-9
+    max_splade = max(it["splade"] for it in items) or 1e-9
 
     for it in items:
-        it["final"] = it["dense"] / max_dense
+        it["final"] = w_dense * (it["dense"] / max_dense) + w_splade * (
+            it["splade"] / max_splade
+        )
 
     # ============================================================
-    # 4. Final ranking
+    # 6. Final ranking
     # ============================================================
     items = sorted(items, key=lambda x: x["final"], reverse=True)[:k]
 
     if verbose:
-        print("=== RO SEARCH (Dense, SO-compatible schema) ===")
+        print("=== RO HYBRID SEARCH (Dense + SPLADE) ===")
         for it in items:
             print(
-                f"{it['ro_id']:12s} | "
-                f"{it['label']:<30s} | "
+                f"{it['id']:12s} | "
+                f"{it['label']:<40s} | "
                 f"dense={it['dense']:.4f} | "
+                f"splade={it['splade']:.4f} | "
                 f"final={it['final']:.4f}"
             )
 

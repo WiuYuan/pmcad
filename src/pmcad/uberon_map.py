@@ -2,7 +2,7 @@ import os
 import json
 
 
-def process_one_folder_get_doid_id(
+def process_one_folder_get_uberon_id(
     folder: str,
     input_name: str,
     output_name: str,
@@ -17,7 +17,7 @@ def process_one_folder_get_doid_id(
     输出 JSON（仅）:
       - pmid
       - abstract
-      - diease_mapping
+      - uberon_map
     """
 
     pmid = os.path.basename(folder)
@@ -33,45 +33,45 @@ def process_one_folder_get_doid_id(
     except Exception:
         return None, [
             {"type": "status", "name": f"pmid:{pmid} (load error)"},
-            {"type": "metric", "correct": 0, "total": 0},
+            {"type": "metric", "correct": 0, "total": 1},
         ]
 
     abstract = data.get("abstract")
     relations = data.get("relations", [])
 
     # ---------------------------
-    # 收集所有 doid（去重）
+    # 收集所有 Uberon（去重）
     # ---------------------------
-    doid_items = {}  # (name, desc) -> None
+    uberon_items = {}  # (name, desc) -> None
 
-    def collect_doid_from_entity(ent):
+    def collect_uberon_from_entity(ent):
         if not isinstance(ent, dict):
             return
-        if ent.get("type") == "disease":
+        if ent.get("type") == "anatomy":
             name = ent.get("name")
             desc = ent.get("description", "")
             if name:
-                doid_items[(name, desc)] = None
+                uberon_items[(name, desc)] = None
 
         # 扫 meta
         for m in ent.get("meta", []):
-            if m.get("type") == "disease":
+            if m.get("type") == "anatomy":
                 name = m.get("name")
                 desc = m.get("description", "")
                 if name:
-                    doid_items[(name, desc)] = None
+                    uberon_items[(name, desc)] = None
 
     for sent_block in relations:
         for rel in sent_block.get("rel_from_this_sent", []):
             for field in ("components", "target", "context"):
                 for ent in rel.get(field, []):
-                    collect_doid_from_entity(ent)
+                    collect_uberon_from_entity(ent)
 
     # ---------------------------
-    # 如果没有 doid
+    # 如果没有 anatomy
     # ---------------------------
-    if not doid_items:
-        out = {"pmid": pmid, "abstract": abstract, "doid_map": []}
+    if not uberon_items:
+        out = {"pmid": pmid, "abstract": abstract, "uberon_map": []}
         try:
             with open(out_path, "w", encoding="utf-8") as fw:
                 json.dump(out, fw, ensure_ascii=False, indent=2)
@@ -79,17 +79,17 @@ def process_one_folder_get_doid_id(
             pass
 
         return out, [
-            {"type": "status", "name": f"pmid:{pmid} (no doid)"},
+            {"type": "status", "name": f"pmid:{pmid} (no anatomy)"},
             {"type": "metric", "correct": 0, "total": 0},
         ]
 
     # ---------------------------
-    # doid hybrid search
+    # anatomy hybrid search
     # ---------------------------
-    doid_map = []
+    uberon_map = []
     judge = False
 
-    for name, desc in doid_items.keys():
+    for name, desc in uberon_items.keys():
         query = f"{name}, {desc}" if desc else name
 
         try:
@@ -112,7 +112,7 @@ def process_one_folder_get_doid_id(
         if hits:
             judge = True
 
-        doid_map.append(
+        uberon_map.append(
             {
                 "name": name,
                 "description": desc,
@@ -126,7 +126,7 @@ def process_one_folder_get_doid_id(
     out = {
         "pmid": pmid,
         "abstract": abstract,
-        "doid_map": doid_map,
+        "uberon_map": uberon_map,
     }
 
     try:

@@ -3,6 +3,7 @@ from src.services.elasticsearch import search_via_curl
 
 from src.services.elasticsearch import search_via_curl
 
+
 def search_doid(
     config_path,
     dense_model,
@@ -23,10 +24,7 @@ def search_doid(
     # ============================================================
     # 1. Dense Recall (KNN)
     # ============================================================
-    qvec_dense = dense_model.encode(
-        query,
-        normalize_embeddings=True
-    ).tolist()
+    qvec_dense = dense_model.encode(query, normalize_embeddings=True).tolist()
 
     knn_body = {
         "size": vec_topn,
@@ -36,13 +34,7 @@ def search_doid(
             "k": vec_topn,
             "num_candidates": max(vec_topn * 3, 1000),
         },
-        "_source": [
-            "doid_id",
-            "label",
-            "definition",
-            "text_all",
-            "splade"
-        ]
+        "_source": ["id", "label", "text_all", "splade"],
     }
 
     hits_knn = search_via_curl(config_path, index_name, knn_body)
@@ -57,11 +49,7 @@ def search_doid(
     val = sparse_vec.values().tolist()
     tokens = splade_model.tokenizer.convert_ids_to_tokens(idx)
 
-    q_splade = {
-        tok: float(v)
-        for tok, v in zip(tokens, val)
-        if float(v) > 0
-    }
+    q_splade = {tok: float(v) for tok, v in zip(tokens, val) if float(v) > 0}
 
     # ============================================================
     # 3. Build candidate list
@@ -69,16 +57,17 @@ def search_doid(
     items = []
     for h in hits_knn:
         src = h["_source"]
-        items.append({
-            "doid_id": src["doid_id"],
-            "label": src["label"],
-            "definition": src.get("definition", ""),
-            "text_all": src.get("text_all", ""),
-            "dense": h["_score"],
-            "splade": 0.0,
-            "doc_splade": src.get("splade", {}),
-            "final": 0.0,
-        })
+        items.append(
+            {
+                "id": src["id"],
+                "label": src["label"],
+                "text_all": src.get("text_all", ""),
+                "dense": h["_score"],
+                "splade": 0.0,
+                "doc_splade": src.get("splade", {}),
+                "final": 0.0,
+            }
+        )
 
     # ============================================================
     # 4. SPLADE dot-product reranking
@@ -99,9 +88,8 @@ def search_doid(
     max_splade = max(it["splade"] for it in items) or 1e-9
 
     for it in items:
-        it["final"] = (
-            w_dense * (it["dense"] / max_dense) +
-            w_splade * (it["splade"] / max_splade)
+        it["final"] = w_dense * (it["dense"] / max_dense) + w_splade * (
+            it["splade"] / max_splade
         )
 
     # ============================================================
@@ -113,7 +101,7 @@ def search_doid(
         print("=== DOID HYBRID SEARCH (Dense + SPLADE) ===")
         for it in items:
             print(
-                f"{it['doid_id']:12s} | "
+                f"{it['id']:12s} | "
                 f"{it['label']:<40s} | "
                 f"dense={it['dense']:.4f} | "
                 f"splade={it['splade']:.4f} | "
@@ -121,4 +109,3 @@ def search_doid(
             )
 
     return items
-

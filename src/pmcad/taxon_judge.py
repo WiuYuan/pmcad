@@ -1,15 +1,18 @@
 import os
 import json
 
+
 def build_species_selection_prompt(name: str, hits: list, abstract: str) -> str:
     """
     构造 LLM 的 species 选择 prompt。
     """
 
-    hits_text = "\n".join([
-        f"- TAXID {h['id']}: {h['name']} (rank: {h.get('rank','')}, score: {h.get('score','')})"
-        for h in hits
-    ])
+    hits_text = "\n".join(
+        [
+            f"- TAXID {h['id']}: {h['name']} (description: {h.get('description','')}, rank: {h.get('rank','')})"
+            for h in hits
+        ]
+    )
 
     return f"""
 You are an expert in biological taxonomy identification.
@@ -37,7 +40,7 @@ Your answer:
 
 
 def normalize_taxid(s: str):
-    return s.strip().replace('"', '').replace("'", "")
+    return s.strip().replace('"', "").replace("'", "")
 
 
 def match_llm_output_to_taxid(llm_output: str, hits: list):
@@ -56,14 +59,11 @@ def match_llm_output_to_taxid(llm_output: str, hits: list):
     return None
 
 
-def process_one_folder_judge_species(
-    folder: str,
-    input_name: str,
-    output_name: str,
-    llm=None
+def process_one_folder_judge_taxon_id(
+    folder: str, input_name: str, output_name: str, llm=None
 ):
     """
-    对 species_mapping 中的每个 species，用 LLM 从 hits 中挑选最正确的物种。
+    对 taxon_map 中的每个 species，用 LLM 从 hits 中挑选最正确的物种。
     """
 
     pmid = os.path.basename(folder)
@@ -71,9 +71,7 @@ def process_one_folder_judge_species(
     out_path = os.path.join(folder, output_name)
 
     if not os.path.exists(in_path):
-        return None, [
-            {"type": "status", "name": f"skip pmid {pmid} (no file)"}
-        ]
+        return None, [{"type": "status", "name": f"skip pmid {pmid} (no file)"}]
 
     # --- load json ---
     try:
@@ -82,11 +80,11 @@ def process_one_folder_judge_species(
     except Exception as e:
         return None, [
             {"type": "status", "name": f"load fail pmid {pmid}"},
-            {"type": "error", "msg": str(e)}
+            {"type": "error", "msg": str(e)},
         ]
 
     abstract = data.get("abstract", "")
-    sp_list = data.get("species_mapping", [])
+    sp_list = data.get("taxon_map", [])
 
     total = 0
     correct = 0
@@ -123,7 +121,7 @@ def process_one_folder_judge_species(
             correct += 1
         total += 1
 
-    data["species_mapping"] = sp_list
+    data["taxon_map"] = sp_list
 
     # --- write output ---
     try:
@@ -132,7 +130,7 @@ def process_one_folder_judge_species(
     except Exception as e:
         return None, [
             {"type": "status", "name": f"write fail pmid {pmid}"},
-            {"type": "error", "msg": str(e)}
+            {"type": "error", "msg": str(e)},
         ]
 
     return data, [

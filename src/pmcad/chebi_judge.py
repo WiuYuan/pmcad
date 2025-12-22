@@ -2,70 +2,71 @@ import os
 import json
 
 
-def build_uniprot_selection_prompt(
-    original_name: str, species: str, entity_type: str, hits: list, abstract: str
-) -> str:
+def build_chebi_selection_prompt(original_name: str, hits: list, abstract: str) -> str:
     """
-    构建让 LLM 选择最正确 UniProt accession 的 prompt。
+    构建让 LLM 选择最正确 ChEBI ID 的 prompt。
     """
+
     hits_text = "\n".join([f"- {h['id']}: {h.get('description', '')}" for h in hits])
 
     return f"""
-You are an expert in UniProt protein selection.
+You are an expert in chemical entity normalization using ChEBI.
 
-Below is a biological ENTITY and its CANDIDATE UniProt entries.
+Below is a CHEMICAL ENTITY mentioned in a biomedical context,
+followed by CANDIDATE ChEBI entries.
 
 Your task:
-- Select **ONE best UniProt accession** from the candidate list.
-- The correct choice must match the entity's biological meaning, name, and species.
+- Select **ONE best ChEBI ID** from the candidate list.
+- The correct choice must match the chemical meaning of the entity.
 - If none of the candidates is correct, output "None".
 
 RULES:
-- Reason based on entity name, species, and protein/RNA type.
-- Prefer canonical entries over fragments or unrelated proteins.
-- If multiple entries represent the same protein, choose the canonical reviewed (Swiss-Prot) one when possible.
+- Reason based on the chemical name and the biological context.
+- Prefer exact chemical entities over classes if applicable.
+- If multiple candidates are plausible, choose the most specific one.
 
 OUTPUT FORMAT:
-- ONLY output ONE accession string exactly from the candidate list, OR output "None".
+- ONLY output ONE ChEBI ID exactly from the candidate list, OR output "None".
 No explanations.
 
-ENTITY:
+CHEMICAL ENTITY:
 Name: "{original_name}"
-Species: "{species}"
-Type: "{entity_type}"
 
 ABSTRACT:
 \"\"\"{abstract}\"\"\"
 
-CANDIDATE UniProt ENTRIES:
+CANDIDATE ChEBI ENTRIES:
 {hits_text}
 
 Your answer:
 """
 
 
-def normalize_uniprot(s: str):
+def normalize_chebi(s: str):
     return s.strip().upper().replace('"', "").replace("'", "")
 
 
-def match_llm_output_to_uniprot(llm_output: str, hits: list):
+def match_llm_output_to_chebi(llm_output: str, hits: list):
     """
-    匹配 LLM 返回的 accession 到 hits。
+    匹配 LLM 返回的 ChEBI ID 到 hits。
     """
-    out = normalize_uniprot(llm_output)
+    out = normalize_chebi(llm_output)
 
     if out == "NONE":
         return None
 
     for h in hits:
-        if normalize_uniprot(h["id"]) in out:
+        if normalize_chebi(h["id"]) in out:
             return h
 
     return None
 
 
-def process_one_folder_judge_uniprot_id(
-    folder: str, input_name: str, output_name: str, llm=None
+def process_one_folder_judge_chebi_id(
+    folder: str,
+    input_name: str,
+    output_name: str,
+    llm=None,
 ):
     pmid = os.path.basename(folder)
     path = os.path.join(folder, input_name)
@@ -84,24 +85,24 @@ def process_one_folder_judge_uniprot_id(
         ]
 
     abstract = data.get("abstract", "")
-    uni_list = data.get("uniprot_map", [])
+    chebi_list = data.get("chebi_map", [])
 
     total = 0
     correct = 0
     total_errors = 0
 
-    for entry in uni_list:
+    for entry in chebi_list:
         original_name = entry.get("name", "")
-        species = entry.get("species", "")
-        entity_type = entry.get("entity_type", "")
         hits = entry.get("hits", [])
 
         if not hits:
             entry["llm_best_match"] = None
             continue
 
-        prompt = build_uniprot_selection_prompt(
-            original_name, species, entity_type, hits, abstract
+        prompt = build_chebi_selection_prompt(
+            original_name=original_name,
+            hits=hits,
+            abstract=abstract,
         )
 
         try:
@@ -113,8 +114,7 @@ def process_one_folder_judge_uniprot_id(
             entry["llm_best_match"] = None
             continue
 
-        # ---- 匹配 accession ----
-        best_hit = match_llm_output_to_uniprot(llm_output, hits)
+        best_hit = match_llm_output_to_chebi(llm_output, hits)
 
         entry["llm_raw_output"] = llm_output
         entry["llm_best_match"] = best_hit
@@ -123,7 +123,7 @@ def process_one_folder_judge_uniprot_id(
             correct += 1
         total += 1
 
-    data["uniprot_map"] = uni_list
+    data["chebi_map"] = chebi_list
 
     out_path = os.path.join(folder, output_name)
     with open(out_path, "w", encoding="utf-8") as fw:

@@ -11,7 +11,7 @@ from src.services.llm import LLM
 # nltk.download("punkt", quiet=True)
 # nltk.download("punkt_tab", quiet=True)
 
-def build_interleaved_context(history):
+def build_interleaved_background(history):
     """
     history: list of dict
       [
@@ -37,7 +37,7 @@ def build_interleaved_context(history):
 
     return "\n".join(blocks)
 
-def build_prompt(context: str, current_sentence: str) -> str:
+def build_prompt(background: str, current_sentence: str) -> str:
     """
     Build prompt for unified relation extraction with strict naming rules,
     8 controlled relations, and evidence replaced by short justification.
@@ -48,19 +48,19 @@ def build_prompt(context: str, current_sentence: str) -> str:
 You are a biomedical relation extraction system.
 Your task is to extract all relations explicitly present in current sentence, representing them in the structured schema below.
 
-Each extracted relation is composed of entities (components, targets, and contexts) and a relation:
+Each extracted relation is composed of entities (components, targets, contexts and corresponding meta field) and a relation:
 - components: the source entities that perform or initiate the relation
-- target: the entities that receive or are affected by the relation
-- context: the biological or experimental background within which the relation occurs (e.g., species, cell type, anatomical structure, disease, experimental condition)
+- targets: the entities that receive or are affected by the relation
+- contexts: the biological or experimental background within which the relation occurs (e.g., species, cell type, anatomical structure, disease, experimental condition)
 
 Every entity must include:
-- name: the canonical entity name used to represent the concept in the schema.
+- name: the canonical entity name used to represent the concept in the schema, MUST be not equal to type.
 - type: one of the allowed ontology-aligned categories
-- description: a concise semantic explanation (required for GO, SO (sequence ontology), domain, anatomy, cell_type, disease; optional for genes, proteins, species, chemicals, RNA unless needed for clarity)
+- description: a concise semantic explanation (required for GO, SO (sequence ontology), domain, anatomy, cell_type, disease; For gene, protein, species, chemical, and RNA entities: description MUST NOT be included.)
 - meta: optional list of additional entity attributes (each with name, type, description)
 - For gene and protein components/targets, meta SHOULD include species whenever the sentence makes it known.
 
-A relation connects components → target and is embedded in a context.
+A relation connects components → targets and is embedded in a contexts.
 The relation must contain:
 - name: RO-style label (no numeric IDs)
 - description: a brief semantic explanation of the relation's meaning
@@ -75,11 +75,11 @@ OUTPUT STRUCTURE
       ...
     ],
     "relation": {{"name": "", "description": "..."}},
-    "target": [
+    "targets": [
       {{"name": "...", "description": "...", "type": "...", "meta": [{{"name": "...", "description": "...", "type": "..."}}, ...]}},
       ...
     ],
-    "context": [
+    "contexts": [
       {{"name": "...", "description": "...", "type": "...", "meta": [{{"name": "...", "description": "...", "type": "..."}}, ...]}},
       ...
     ],
@@ -106,11 +106,13 @@ ENTITY NAMING RULES:
 
 gene:
   - Exact **ONE** gene symbol or ORF label (“TP53”, “J4R”, “ORF1a”).
+  - MUST include species type in meta.
 
 protein:
   - Exact **ONE** protein name (“p53 protein”, “spike glycoprotein”).
   - OR a single, well-defined protein or protein domain defined by a specific biochemical function or structural role explicitly stated in the text.
   - No accessions.
+  - MUST include species type in meta.
 
 domain:
   - A structurally or functionally defined region of a protein explicitly described in the text,
@@ -134,9 +136,7 @@ RNA:
   - Generic or class-level RNA terms that do NOT specify an exact biological instance
     (e.g., “mRNA”, “tRNA”, “rRNA”, “viral RNA”, “host mRNA”) 
     MUST NOT be annotated as RNA.
-  - If the text only refers to a general RNA class or concept, it should instead be treated as:
-      - GO (if describing a biological process or function), or
-      - omitted from entity extraction.
+  - MUST include species type in meta.
 
 GO:
   - Any phrase describing a molecular function, biological process or cellular component.
@@ -154,6 +154,7 @@ species:
   - The term may correspond to any biological taxonomic rank,
     including but not limited to:
       species, subspecies, genus, family, or higher viral taxonomic groups.
+  — MUST NOT include description field.
 
 SO:
   - MUST correspond to an explicit Sequence Ontology (SO) term present in the text,
@@ -208,19 +209,23 @@ Each relation must include a name and a brief description, but must not include 
 Use only the RO labels and their semantic meanings when specifying a relation.
 
 ============================================================
-CONTEXT RULES:
+CONTEXTS RULES:
 
 1. If a relation occurs in a specific biological background explicitly mentioned 
    in the CURRENT SENTENCE — such as a species, anatomical structure, 
    cell type or disease — you MUST include these 
-   as separate context entities in the "context" list.
+   as separate contexts entities in the "contexts" list.
 
 2. Species, anatomy, cell_type, disease, and GO entities MAY appear in the 
-   "context" list when they describe the biological setting of the relation.
+   "contexts" list when they describe the biological setting of the relation.
 
-3. When an entity is placed in the "context" list, ONLY add "meta" fields 
-   to gene, protein, or RNA entities inside the context.
+3. When an entity is placed in the "contexts" list, ONLY add "meta" fields 
+   to gene, protein, or RNA entities inside the contexts.
 
+============================================================
+META RULES:
+
+Each meta entry must itself be a valid entity and follow all rules of its entity type.
 
 ============================================================
 OUTPUT RULES:
@@ -228,7 +233,7 @@ OUTPUT RULES:
 1. Output ONLY a JSON list.
 2. Each element MUST follow the defined schema.
 3. If no relations exist, output [].
-4. Use the information from the context to extract relations from current sentence.
+4. Use the information from the contexts to extract relations from current sentence.
 5. Keep the "components" list as small as possible:
     - Include only the minimal set of entities necessary to express the relation.
     - Do NOT add extra entities that are not required for the relation.
@@ -240,7 +245,7 @@ OUTPUT RULES:
 ============================================================
 BACKGROUND (relations before the current one):
 
-{context}
+{background}
 ============================================================
 CURRENT SENTENCE:
 
@@ -389,8 +394,8 @@ def process_one_folder_llm_get_relations(
         all_relations = []
         sentences = sent_tokenize(abstract)
         for i, sent in enumerate(sentences):
-            context = build_interleaved_context(history)
-            prompt = build_prompt(context, sent)
+            background = build_interleaved_background(history)
+            prompt = build_prompt(background, sent)
 
             raw = llm.query(prompt)
 

@@ -1,6 +1,7 @@
 import os
 import json
 
+
 def build_so_selection_prompt(query_name: str, query_desc: str, hits: list) -> str:
     """
     要求 LLM 从 hits 中选出 “语义上最正确（最符合 query_name/query_desc 的 SO）” 的那个。
@@ -47,8 +48,11 @@ CANDIDATE SO TERMS:
 
 Your answer:
 """
+
+
 def normalize(s: str):
-    return s.strip().lower().replace('"', '').replace("'", "")
+    return s.strip().lower().replace('"', "").replace("'", "")
+
 
 def match_llm_output_to_hit(llm_output: str, hits: list):
     """
@@ -79,7 +83,10 @@ def match_llm_output_to_hit(llm_output: str, hits: list):
 
     return None
 
-def process_one_folder_judge_so_id(folder: str, input_name: str, output_name: str, llm=None):
+
+def process_one_folder_judge_so_id(
+    folder: str, input_name: str, output_name: str, llm=None
+):
 
     pmid = os.path.basename(folder)
     path = os.path.join(folder, input_name)
@@ -97,7 +104,7 @@ def process_one_folder_judge_so_id(folder: str, input_name: str, output_name: st
             {"type": "error", "msg": str(e)},
         ]
 
-    so_list = data.get("so_mapping", [])
+    so_list = data.get("so_map", [])
 
     # === 处理每个 mapping ===
     n_total = 0
@@ -130,7 +137,7 @@ def process_one_folder_judge_so_id(folder: str, input_name: str, output_name: st
         if best_hit is not None:
             n_selected += 1
 
-    data["so_mapping"] = so_list
+    data["so_map"] = so_list
 
     # === 写回 JSON ===
     out_path = os.path.join(folder, output_name)
@@ -145,5 +152,5 @@ def process_one_folder_judge_so_id(folder: str, input_name: str, output_name: st
 
     return data, [
         {"type": "status", "name": f"ok pmid {pmid}"},
-        {"type": "metric", "correct": n_selected, "total": n_total}
+        {"type": "metric", "correct": n_selected, "total": n_total},
     ]

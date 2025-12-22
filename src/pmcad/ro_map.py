@@ -17,7 +17,7 @@ def process_one_folder_get_ro_id(
     输出 JSON（仅）:
       - pmid
       - abstract
-      - ro_mapping
+      - ro_map
     """
 
     pmid = os.path.basename(folder)
@@ -33,7 +33,7 @@ def process_one_folder_get_ro_id(
     except Exception:
         return None, [
             {"type": "status", "name": f"pmid:{pmid} (load error)"},
-            {"type": "metric", "correct": 0, "total": 1},
+            {"type": "metric", "correct": 0, "total": 0},
         ]
 
     abstract = data.get("abstract")
@@ -60,11 +60,7 @@ def process_one_folder_get_ro_id(
     # 如果没有 RO
     # ---------------------------
     if not ro_items:
-        out = {
-            "pmid": pmid,
-            "abstract": abstract,
-            "ro_mapping": []
-        }
+        out = {"pmid": pmid, "abstract": abstract, "ro_map": []}
         try:
             with open(out_path, "w", encoding="utf-8") as fw:
                 json.dump(out, fw, ensure_ascii=False, indent=2)
@@ -73,16 +69,16 @@ def process_one_folder_get_ro_id(
 
         return out, [
             {"type": "status", "name": f"pmid:{pmid} (no ro)"},
-            {"type": "metric", "correct": 0, "total": 1},
+            {"type": "metric", "correct": 0, "total": 0},
         ]
 
     # ---------------------------
     # RO hybrid search
     # ---------------------------
-    ro_mapping = []
+    ro_map = []
     judge = False
 
-    for (name, desc) in ro_items.keys():
+    for name, desc in ro_items.keys():
         query = f"{name}, {desc}" if desc else name
 
         try:
@@ -92,22 +88,26 @@ def process_one_folder_get_ro_id(
 
         hits = []
         for rank, it in enumerate(items, start=1):
-            hits.append({
-                "id": it.get("ro_id"),
-                "name": it.get("label"),
-                "description": it.get("text_all"),
-                "score": round(float(it.get("final", 0.0)), 4),
-                "rank": rank,
-            })
+            hits.append(
+                {
+                    "id": it.get("id"),
+                    "name": it.get("label"),
+                    "description": it.get("text_all"),
+                    "score": round(float(it.get("final", 0.0)), 4),
+                    "rank": rank,
+                }
+            )
 
         if hits:
             judge = True
 
-        ro_mapping.append({
-            "name": name,
-            "description": desc,
-            "hits": hits,
-        })
+        ro_map.append(
+            {
+                "name": name,
+                "description": desc,
+                "hits": hits,
+            }
+        )
 
     # ---------------------------
     # 写最终输出（只保留 3 个 key）
@@ -115,7 +115,7 @@ def process_one_folder_get_ro_id(
     out = {
         "pmid": pmid,
         "abstract": abstract,
-        "ro_mapping": ro_mapping,
+        "ro_map": ro_map,
     }
 
     try:

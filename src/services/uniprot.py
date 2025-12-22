@@ -4,6 +4,7 @@ import re
 import time
 import requests
 
+
 # =====================================
 # UniProt search
 # =====================================
@@ -97,20 +98,58 @@ def extract_uniprot_info(entry, rank):
 
 
 # =====================================
-# Extract species from entity.meta
+# Extract species from relation (ALL META INCLUDED)
 # =====================================
 def extract_species_from_relation(rel):
-    ctx_species = None
-    for c in rel.get("context", []):
-        if c.get("type") == "species":
-            ctx_species = c.get("name")
+    """
+    Species resolution priority:
+    1) entity.meta
+    2) relation.context (+ context.meta)
+    3) relation.components + relation.target (+ their meta)
+    """
 
+    # ---- collect relation-level species (order matters) ----
+    rel_species = []
+
+    # ---------- 1. context (+ meta) ----------
+    for c in rel.get("context", []):
+        # context itself
+        if c.get("type") == "species" and c.get("name"):
+            rel_species.append(c["name"])
+
+        # context.meta
+        for m in c.get("meta", []):
+            if m.get("type") == "species" and m.get("name"):
+                rel_species.append(m["name"])
+
+    # ---------- 2. components + target (+ meta) ----------
+    for field in ("components", "target"):
+        for ent in rel.get(field, []):
+            # entity itself
+            if ent.get("type") == "species" and ent.get("name"):
+                rel_species.append(ent["name"])
+
+            # entity.meta
+            for m in ent.get("meta", []):
+                if m.get("type") == "species" and m.get("name"):
+                    rel_species.append(m["name"])
+
+    # ---- deduplicate but keep order ----
+    seen = set()
+    rel_species = [x for x in rel_species if not (x in seen or seen.add(x))]
+
+    # ---------- entity-level resolver ----------
     def _inner(ent):
-        # meta first
+        # 1️⃣ entity.meta has highest priority
         for m in ent.get("meta", []):
-            if m.get("type") == "species":
-                return m.get("name")
-        return ctx_species
+            if m.get("type") == "species" and m.get("name"):
+                return m["name"]
+
+        # 2️⃣ fallback to relation-level species
+        if rel_species:
+            return rel_species[0]
+
+        return None
 
     return _inner
 
@@ -155,22 +194,44 @@ def process_one_folder_get_uniprot_id(
 
     relations = rel_data.get("relations", [])
 
-    # ------------- load species_mapping --------------
+    # ------------- load taxon_map --------------
     try:
         with open(os.path.join(folder, species_file), "r", encoding="utf-8") as f:
             sp_data = json.load(f)
     except Exception:
         return None, [{"type": "status", "name": f"{pmid} (species load error)"}]
 
-    best_species = {}  # name → best_match_name
-
-    for item in sp_data.get("species_mapping", []):
-        nm = item["name"]
+    # ------------------------------------------------
+    # 1️⃣ build best_species map (LLM-resolved taxonomy)
+    # ------------------------------------------------
+    best_species = {}  # raw name → resolved taxonomy name
+    for item in sp_data.get("taxon_map", []):
+        nm = item.get("name")
         best = item.get("llm_best_match")
-        if best:
-            best_species[nm] = best["name"]
+        if nm and best:
+            best_species[nm] = best.get("name")
 
-    # ------------- collect gene/protein --------------
+    # ------------------------------------------------
+    # 2️⃣ collect document-level species from ALL relations
+    # ------------------------------------------------
+    doc_species = []
+    for block in relations:
+        for rel in block.get("rel_from_this_sent", []):
+            get_sp = extract_species_from_relation(rel)
+            sp = get_sp({})  # trick: force relation-level fallback
+            if sp:
+                doc_species.append(sp)
+
+    # 去重但保序
+    seen = set()
+    doc_species = [x for x in doc_species if not (x in seen or seen.add(x))]
+
+    # document-level fallback species（raw name）
+    doc_level_species = doc_species[0] if doc_species else None
+
+    # ------------------------------------------------
+    # 3️⃣ collect gene/protein entities
+    # ------------------------------------------------
     needed = set()
 
     for block in relations:
@@ -180,34 +241,55 @@ def process_one_folder_get_uniprot_id(
                 for ent in rel.get(field, []):
                     collect_gene_protein(ent, get_sp, needed)
 
-    # ------------- unify species via best match --------------
+    # ------------------------------------------------
+    # 4️⃣ unify species with fallback
+    # ------------------------------------------------
     filtered_items = []
 
-    for (nm, sp, etype) in needed:
-        
-        # case 1: species has llm_best_match → use matched taxonomy name
-        if sp in best_species:
+    for nm, sp, etype in needed:
+        species_final = None
+
+        # case 1: entity/relation-level species + resolved taxonomy
+        if sp and sp in best_species:
             species_final = best_species[sp]
-        
-        # case 2: species missing or not matched → fallback to global search
-        else:
-            species_final = None   # means uniprot_query(term) will ignore species
+
+        # case 2: entity-level species but no mapping
+        elif sp:
+            species_final = sp
+
+        # case 3: fallback to document-level species
+        elif doc_level_species:
+            species_final = best_species.get(doc_level_species, doc_level_species)
+
+        # else: species_final stays None (global UniProt search)
 
         filtered_items.append((nm, species_final, etype))
 
     if not filtered_items:
-        out = {"pmid": pmid, "uniprot_mapping": []}
+        out = {"pmid": pmid, "uniprot_map": []}
         with open(os.path.join(folder, output_file), "w", encoding="utf-8") as fw:
             json.dump(out, fw, ensure_ascii=False, indent=2)
-        return out, [{"type": "status", "name": f"{pmid} (no gene/protein after species filtering)"}]
+        return out, [
+            {
+                "type": "status",
+                "name": f"{pmid} (no gene/protein after species filtering)",
+            }
+        ]
 
-    # ------------- UniProt search --------------
-    uniprot_mapping = []
+    # ------------------------------------------------
+    # 5️⃣ UniProt search
+    # ------------------------------------------------
+    uniprot_map = []
     judge = False
 
-    for (name, species, etype) in filtered_items:
+    for name, species, etype in filtered_items:
         try:
-            res = uniprot_query(name, species, max_retries_per_item=max_retries_per_item, top_k=top_candidates)
+            res = uniprot_query(
+                name,
+                species,
+                max_retries_per_item=max_retries_per_item,
+                top_k=top_candidates,
+            )
             hits_raw = res.get("results") or []
         except Exception:
             hits_raw = []
@@ -215,27 +297,31 @@ def process_one_folder_get_uniprot_id(
         hits = []
         for rank, entry in enumerate(hits_raw, start=1):
             info = extract_uniprot_info(entry, rank)
-            hits.append({
-                "id": info["accession"],
-                "name": info["accession"],
-                "description": info["description"],
-                "rank": rank,
-            })
+            hits.append(
+                {
+                    "id": info["accession"],
+                    "name": info["accession"],
+                    "description": info["description"],
+                    "rank": rank,
+                }
+            )
 
         if hits:
             judge = True
 
-        uniprot_mapping.append({
-            "name": name,
-            "species": species,
-            "entity_type": etype,
-            "hits": hits,
-        })
+        uniprot_map.append(
+            {
+                "name": name,
+                "species": species,
+                "entity_type": etype,
+                "hits": hits,
+            }
+        )
 
     # ------------- write output --------------
     out = {
         "pmid": pmid,
-        "uniprot_mapping": uniprot_mapping,
+        "uniprot_map": uniprot_map,
     }
 
     with open(os.path.join(folder, output_file), "w", encoding="utf-8") as fw:

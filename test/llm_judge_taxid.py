@@ -1,5 +1,5 @@
 from src.pmcad.parallel_process import process_folder_parallel
-from pmcad.src.pmcad.tax_judge import process_one_folder_judge_species
+from pmcad.src.pmcad.taxon_judge import process_one_folder_judge_species
 from src.services.llm import LLM
 
 
@@ -17,5 +17,5 @@ results = process_folder_parallel(
     input_name="ds_taxid.json",
     output_name="ds_taxid_taxidmap.json",
     workers=16,
-    llm=llm
+    llm=llm,
 )

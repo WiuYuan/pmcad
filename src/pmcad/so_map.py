@@ -1,6 +1,7 @@
 import os
 import json
 
+
 def process_one_folder_get_so_id(
     folder: str,
     input_name: str,
@@ -16,7 +17,7 @@ def process_one_folder_get_so_id(
     输出 JSON（仅）:
       - pmid
       - abstract
-      - so_mapping
+      - so_map
     """
 
     pmid = os.path.basename(folder)
@@ -32,7 +33,7 @@ def process_one_folder_get_so_id(
     except Exception:
         return None, [
             {"type": "status", "name": f"pmid:{pmid} (load error)"},
-            {"type": "metric", "correct": 0, "total": 1},
+            {"type": "metric", "correct": 0, "total": 0},
         ]
 
     abstract = data.get("abstract")
@@ -62,7 +63,7 @@ def process_one_folder_get_so_id(
 
     for sent_block in relations:
         for rel in sent_block.get("rel_from_this_sent", []):
-            for field in ("components", "target", "context"):
+            for field in ("components", "targets", "contexts"):
                 for ent in rel.get(field, []):
                     collect_so_from_entity(ent)
 
@@ -70,11 +71,7 @@ def process_one_folder_get_so_id(
     # 如果没有 so
     # ---------------------------
     if not so_items:
-        out = {
-            "pmid": pmid,
-            "abstract": abstract,
-            "so_mapping": []
-        }
+        out = {"pmid": pmid, "abstract": abstract, "so_map": []}
         try:
             with open(out_path, "w", encoding="utf-8") as fw:
                 json.dump(out, fw, ensure_ascii=False, indent=2)
@@ -83,16 +80,16 @@ def process_one_folder_get_so_id(
 
         return out, [
             {"type": "status", "name": f"pmid:{pmid} (no so)"},
-            {"type": "metric", "correct": 0, "total": 1},
+            {"type": "metric", "correct": 0, "total": 0},
         ]
 
     # ---------------------------
     # so hybrid search
     # ---------------------------
-    so_mapping = []
+    so_map = []
     judge = False
 
-    for (name, desc) in so_items.keys():
+    for name, desc in so_items.keys():
         query = f"{name}, {desc}" if desc else name
 
         try:
@@ -102,22 +99,26 @@ def process_one_folder_get_so_id(
 
         hits = []
         for rank, it in enumerate(items, start=1):
-            hits.append({
-                "id": it.get("so_id"),
-                "name": it.get("label"),
-                "description": it.get("text_all"),
-                "score": round(float(it.get("final", 0.0)), 4),
-                "rank": rank,
-            })
+            hits.append(
+                {
+                    "id": it.get("id"),
+                    "name": it.get("label"),
+                    "description": it.get("text_all"),
+                    "score": round(float(it.get("final", 0.0)), 4),
+                    "rank": rank,
+                }
+            )
 
         if hits:
             judge = True
 
-        so_mapping.append({
-            "name": name,
-            "description": desc,
-            "hits": hits,
-        })
+        so_map.append(
+            {
+                "name": name,
+                "description": desc,
+                "hits": hits,
+            }
+        )
 
     # ---------------------------
     # 写最终输出（只保留 3 个 key）
@@ -125,7 +126,7 @@ def process_one_folder_get_so_id(
     out = {
         "pmid": pmid,
         "abstract": abstract,
-        "so_mapping": so_mapping,
+        "so_map": so_map,
     }
 
     try:

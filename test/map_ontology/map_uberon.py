@@ -15,23 +15,25 @@ from sentence_transformers import SparseEncoder
 # ============================================================
 ES_CONFIG = "/data/wyuan/workspace/pmcdata_pro/pmcad/config/elasticsearch.yaml"
 
-device = "cuda:3"
+device = "cpu"
 # Dense model
 dense_model = SentenceTransformer(
     "/data/wyuan/.cache/huggingface/hub/models--pritamdeka--BioBERT-mnli-snli-scinli-scitail-mednli-stsb/snapshots/82d44689be9cf3c6c6a6f77cc3171c93282873a1",
     device=device,
 )
+# dense_model = SentenceTransformer("pritamdeka/BioBERT-mnli-snli-scinli-scitail-mednli-stsb")
+
 # SPLADE model
 splade_model = SparseEncoder(
     model_name_or_path="/data/wyuan/.cache/huggingface/hub/models--NeuML--pubmedbert-base-splade/snapshots/f284fcbafe4761108f27357f5278d846a630059e",
     device=device,
 )
+# splade_model = SparseEncoder("NeuML/pubmedbert-base-splade")
+"./bin/elasticsearch"
 
-
-from src.pmcad.ro_search import search_ro
-
-from src.pmcad.ro_map import process_one_folder_get_ro_id
-from src.pmcad.ro_judge import process_one_folder_judge_ro_id
+from src.pmcad.uberon_map import process_one_folder_get_uberon_id
+from src.pmcad.uberon_judge import process_one_folder_judge_uberon_id
+from src.pmcad.uberon_search import search_uberon
 from src.pmcad.parallel_process import process_folder_parallel
 from src.services.llm import LLM
 
@@ -39,12 +41,12 @@ folder = "/data/wyuan/workspace/pmcdata_pro/data/pattern/rna_capping"
 limit = 1024
 process_folder_parallel(
     folder=folder,
-    process_one_folder=process_one_folder_get_ro_id,
+    process_one_folder=process_one_folder_get_uberon_id,
     workers=32,
     input_name="ds.json",
-    output_name="ds_ro.json",
+    output_name="ds_uberon.json",
     limit=limit,
-    search_func=lambda query: search_ro(
+    search_func=lambda query: search_uberon(
         query=query,
         config_path=ES_CONFIG,
         dense_model=dense_model,
@@ -61,9 +63,9 @@ llm = LLM(
 )
 results = process_folder_parallel(
     folder=folder,
-    process_one_folder=process_one_folder_judge_ro_id,
-    input_name="ds_ro.json",
-    output_name="ds_ro.json",
+    process_one_folder=process_one_folder_judge_uberon_id,
+    input_name="ds_uberon.json",
+    output_name="ds_uberon.json",
     workers=16,
     limit=limit,
     llm=llm,

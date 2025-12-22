@@ -1,15 +1,13 @@
 from src.services.llm import LLM
 from src.services.elasticsearch import search_via_curl
 
-from src.services.elasticsearch import search_via_curl
 
-
-def search_so(
+def search_mesh(
     config_path,
     dense_model,
     splade_model,
     query,
-    index_name="so_index",
+    index_name="mesh_index",
     k=10,
     vec_topn=200,
     w_dense=0.5,
@@ -17,7 +15,7 @@ def search_so(
     verbose=True,
 ):
     """
-    SO Hybrid search (Dense recall + SPLADE rerank)
+    mesh Hybrid search (Dense recall + SPLADE rerank)
     完全对齐 search_dense_knn 的工程风格
     """
 

@@ -2,7 +2,7 @@ import os
 import json
 
 
-def process_one_folder_get_doid_id(
+def process_one_folder_get_cl_id(
     folder: str,
     input_name: str,
     output_name: str,
@@ -40,38 +40,38 @@ def process_one_folder_get_doid_id(
     relations = data.get("relations", [])
 
     # ---------------------------
-    # 收集所有 doid（去重）
+    # 收集所有 cl（去重）
     # ---------------------------
-    doid_items = {}  # (name, desc) -> None
+    cl_items = {}  # (name, desc) -> None
 
-    def collect_doid_from_entity(ent):
+    def collect_cl_from_entity(ent):
         if not isinstance(ent, dict):
             return
-        if ent.get("type") == "disease":
+        if ent.get("type") == "cell_type":
             name = ent.get("name")
             desc = ent.get("description", "")
             if name:
-                doid_items[(name, desc)] = None
+                cl_items[(name, desc)] = None
 
         # 扫 meta
         for m in ent.get("meta", []):
-            if m.get("type") == "disease":
+            if m.get("type") == "cell_type":
                 name = m.get("name")
                 desc = m.get("description", "")
                 if name:
-                    doid_items[(name, desc)] = None
+                    cl_items[(name, desc)] = None
 
     for sent_block in relations:
         for rel in sent_block.get("rel_from_this_sent", []):
             for field in ("components", "target", "context"):
                 for ent in rel.get(field, []):
-                    collect_doid_from_entity(ent)
+                    collect_cl_from_entity(ent)
 
     # ---------------------------
-    # 如果没有 doid
+    # 如果没有 cl
     # ---------------------------
-    if not doid_items:
-        out = {"pmid": pmid, "abstract": abstract, "doid_map": []}
+    if not cl_items:
+        out = {"pmid": pmid, "abstract": abstract, "cl_map": []}
         try:
             with open(out_path, "w", encoding="utf-8") as fw:
                 json.dump(out, fw, ensure_ascii=False, indent=2)
@@ -79,17 +79,17 @@ def process_one_folder_get_doid_id(
             pass
 
         return out, [
-            {"type": "status", "name": f"pmid:{pmid} (no doid)"},
+            {"type": "status", "name": f"pmid:{pmid} (no cl)"},
             {"type": "metric", "correct": 0, "total": 0},
         ]
 
     # ---------------------------
-    # doid hybrid search
+    # cl hybrid search
     # ---------------------------
-    doid_map = []
+    cl_map = []
     judge = False
 
-    for name, desc in doid_items.keys():
+    for name, desc in cl_items.keys():
         query = f"{name}, {desc}" if desc else name
 
         try:
@@ -112,7 +112,7 @@ def process_one_folder_get_doid_id(
         if hits:
             judge = True
 
-        doid_map.append(
+        cl_map.append(
             {
                 "name": name,
                 "description": desc,
@@ -126,7 +126,7 @@ def process_one_folder_get_doid_id(
     out = {
         "pmid": pmid,
         "abstract": abstract,
-        "doid_map": doid_map,
+        "cl_map": cl_map,
     }
 
     try:

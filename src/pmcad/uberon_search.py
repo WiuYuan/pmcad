@@ -1,15 +1,12 @@
-from src.services.llm import LLM
-from src.services.elasticsearch import search_via_curl
-
 from src.services.elasticsearch import search_via_curl
 
 
-def search_so(
+def search_uberon(
     config_path,
     dense_model,
     splade_model,
     query,
-    index_name="so_index",
+    index_name="uberon_index",
     k=10,
     vec_topn=200,
     w_dense=0.5,
@@ -17,8 +14,9 @@ def search_so(
     verbose=True,
 ):
     """
-    SO Hybrid search (Dense recall + SPLADE rerank)
-    完全对齐 search_dense_knn 的工程风格
+    UBERON Hybrid search (Dense recall + SPLADE rerank)
+
+    完全对齐 search_go / search_so 的工程风格
     """
 
     # ============================================================
@@ -96,11 +94,10 @@ def search_so(
     # 6. Final ranking
     # ============================================================
     items = sorted(items, key=lambda x: x["final"], reverse=True)[:k]
-    N = min(30, len(items))
-    label_width = max(40, max(len(it["label"]) for it in items[:N]))
 
     if verbose:
-        print("=== SO HYBRID SEARCH (Dense + SPLADE) ===")
+        label_width = max(40, max(len(it["label"]) for it in items))
+        print("=== UBERON HYBRID SEARCH (Dense + SPLADE) ===")
         for it in items:
             print(
                 f"{it['id']:12s} | "
