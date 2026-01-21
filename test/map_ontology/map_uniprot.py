@@ -1,18 +1,27 @@
-from src.services.uniprot import process_one_folder_get_uniprot_id
+from src.services.uniprot import search_uniprot
+from src.pmcad.ontology_map import Ontology, process_one_folder_get_db_id, process_one_folder_judge_db_id
 from src.pmcad.parallel_process import process_folder_parallel
 
-limit = 1024
+search_func= lambda query: search_uniprot(
+    query=query,
+    k=30,
+)
+
+ot = Ontology(ontology_type=["gene", "protein"], db_type="uniprot", use_species=True, search_func=search_func, filename="ds_uniprot.json", judge_method="strict")
+
+species_ot = Ontology(ontology_type="species", db_type="taxon", filename="ds_taxon.json", judge_method="strict")
+
+
+limit = 16
 
 process_folder_parallel(
     folder="/data/wyuan/workspace/pmcdata_pro/data/pattern/rna_capping",
-    process_one_folder=process_one_folder_get_uniprot_id,
-    relation_file="ds.json",
-    species_file="ds_taxon.json",
-    output_file="ds_uniprot.json",
+    process_one_folder=process_one_folder_get_db_id,
+    input_name="ds.json",
+    ot=ot,
+    species_ot=species_ot,
     limit=limit,
-    max_retries_per_item=10,
     workers=3,
-    top_candidates=30,
 )
 
 
@@ -31,10 +40,9 @@ llm = LLM(
 folder = "/data/wyuan/workspace/pmcdata_pro/data/pattern/rna_capping"
 results = process_folder_parallel(
     folder=folder,
-    process_one_folder=process_one_folder_judge_uniprot_id,
-    input_name="ds_uniprot.json",
-    output_name="ds_uniprot.json",
-    limit=limit,
+    process_one_folder=process_one_folder_judge_db_id,
+    ot=ot,
     workers=16,
-    llm=llm,
+    limit=limit,
+    llm=llm
 )

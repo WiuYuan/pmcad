@@ -75,6 +75,57 @@ def build_rnacentral_description(entry):
 
     return " | ".join(parts)
 
+# =====================================
+# Extract RNAcentral info
+# =====================================
+def extract_rnacentral_info(entry, rank: int):
+    rid = entry.get("id")  # RNAcentral accession
+    desc = build_rnacentral_description(entry)
+
+    return {
+        "id": rid,
+        "name": rid,                # 和你现在的写法一致：name=accession
+        "description": desc or "",
+        "rank": rank,
+    }
+
+
+# =====================================
+# RNAcentral search (UniProt-aligned)
+# =====================================
+def search_rnacentral(
+    term: str,
+    organism: str = None,
+    k: int = 30,
+    max_retries_per_item: int = 5,
+    max_sleep: int = 30,
+):
+    """
+    Return hits list:
+      [{"id":..., "name":..., "description":..., "rank":...}, ...]
+    """
+    try:
+        res = rnacentral_query(
+            term=term,
+            organism=organism,
+            max_sleep=max_sleep,
+            max_retries_per_item=max_retries_per_item,
+            top_k=k,
+        )
+        hits_raw = res.get("results") or []
+    except Exception:
+        hits_raw = []
+
+    hits = []
+    for rank, entry in enumerate(hits_raw[:k], start=1):
+        info = extract_rnacentral_info(entry, rank)
+        # 跳过没有 id 的脏数据（可选）
+        if not info.get("id"):
+            continue
+        hits.append(info)
+
+    return hits
+
 
 # =====================================
 # Extract species from relation (same logic as UniProt)

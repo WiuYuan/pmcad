@@ -36,10 +36,10 @@ from src.pmcad.ontology_map import search_ontology, Ontology
 from src.pmcad.parallel_process import process_folder_parallel
 from src.services.llm import LLM
 
-search_func_so= lambda query: search_ontology(
+search_func= lambda query: search_ontology(
     query=query,
     search_type="dense+splade",
-    index_name="so_index",
+    index_name="mesh_index",
     config_path=ES_CONFIG,
     dense_model=dense_model,
     splade_model=splade_model,
@@ -48,7 +48,7 @@ search_func_so= lambda query: search_ontology(
 )
 
 src_ot = Ontology(ontology_type="RNA", db_type="rnacentral", use_species=True, filename="ds_rnacentral.json", judge_method="strict")
-tgt_ot = Ontology(ontology_type="SO", db_type="so", search_func=search_func_so, filename="ds_so.json", judge_method="strict")
+tgt_ot = Ontology(ontology_type="MeSH", db_type="mesh", search_func=search_func, filename="ds_mesh.json", judge_method="strict")
 
 folder = "/data/wyuan/workspace/pmcdata_pro/data/pattern/rna_capping"
 limit = 1024

@@ -1,4 +1,4 @@
-from src.pmcad.llm_judge_relation import process_one_folder
+from src.pmcad.compare_relation import process_one_folder_rel_coverage_one_shot
 from src.pmcad.parallel_process import process_folder_parallel
 from src.services.llm import LLM
 
@@ -23,14 +23,18 @@ llm = LLM(
 #                    skip_existing=False,
 #                    llm=llm)
 
-process_folder_parallel(
+results = process_folder_parallel(
     folder="/data/wyuan/workspace/pmcdata_pro/data/pattern/chemprot_test",
-    process_one_folder=process_one_folder,
-    input_name="ds_final.json",
-    output_name="ds_final.json",
-    skip_existing=False,
-    llm=llm,
-    # pmidlist=["23524663"],
+    process_one_folder=process_one_folder_rel_coverage_one_shot,
     workers=16,
-    judge_method="strict",
+    pmidlist=None,
+    limit=None,
+    input1_name="cpr_judge.json",
+    input2_name="ds.json",
+    output_name="cpr_qw.coverage.oneshot.json",
+    llm=llm,
+    keep_keys=None,
+    skip_existing=False,
+    write_raw_llm=True,
+    max_candidates=None,
 )

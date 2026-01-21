@@ -181,6 +181,7 @@ def bulk_insert(
     payload = "\n".join(bulk_lines)
     if not payload.endswith("\n"):
         payload += "\n"
+    payload = payload.encode("utf-8")
 
     # /_bulk 或 /{index}/_bulk 都可以
     bulk_url = (

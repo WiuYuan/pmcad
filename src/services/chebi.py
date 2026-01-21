@@ -69,6 +69,51 @@ def extract_chebi_info(doc, rank):
     }
 
 
+def search_chebi(
+    query,
+    k=30,
+    max_retries_per_item=5,
+    max_sleep=30,
+):
+    """
+    Unified ChEBI search function.
+    Returns a list of hits with standard schema:
+    [
+      {
+        "id": CHEBI_ID,
+        "name": CHEBI_ID,
+        "description": str,
+        "rank": int
+      },
+      ...
+    ]
+    """
+    try:
+        res = chebi_query_ols(
+            name=query,
+            max_sleep=max_sleep,
+            max_retries_per_item=max_retries_per_item,
+            top_k=k,
+        )
+        hits_raw = res.get("results") or []
+    except Exception:
+        hits_raw = []
+
+    hits = []
+    for rank, doc in enumerate(hits_raw, start=1):
+        info = extract_chebi_info(doc, rank)
+        hits.append(
+            {
+                "id": info["id"],  # CHEBI:xxxx
+                "name": info["name"],  # CHEBI:xxxx（与你现有规范一致）
+                "description": info["description"],
+                "rank": rank,
+            }
+        )
+
+    return hits
+
+
 def process_one_folder_get_chebi_id(
     folder: str,
     relation_file: str,

@@ -56,7 +56,7 @@ Each extracted relation is composed of entities (components, targets, contexts a
 Every entity must include:
 - name: the canonical entity name used to represent the concept in the schema, MUST be not equal to type.
 - type: one of the allowed ontology-aligned categories
-- description: a concise semantic explanation (required for GO, SO (sequence ontology), domain, anatomy, cell_type, disease; For gene, protein, species, chemical, and RNA entities: description MUST NOT be included.)
+- description: a concise semantic explanation (required for GO, SO (sequence ontology), domain, anatomy, cell_type, disease, chemical; For gene, protein, species, and RNA entities, description MUST NOT be included.)
 - meta: optional list of additional entity attributes (each with name, type, description)
 - For gene and protein components/targets, meta SHOULD include species whenever the sentence makes it known.
 
@@ -95,6 +95,7 @@ ALLOWED ENTITY TYPES
 - "GO"
 - "chemical"
 - "cell_type"
+- "cell_line"
 - "anatomy"
 - "disease"
 - "SO"
@@ -148,12 +149,11 @@ GO:
 chemical:
   - Exact chemical name.
   - MUST refer to a specific, concrete chemical entity
+  - MUST provide a brief chemical description.
 
 species:
   - Exact species or taxonomic name.
-  - The term may correspond to any biological taxonomic rank,
-    including but not limited to:
-      species, subspecies, genus, family, or higher viral taxonomic groups.
+  - The term may correspond to any biological taxonomic rank.
   — MUST NOT include description field.
 
 SO:
@@ -190,15 +190,21 @@ anatomy:
   - MUST NOT include subcellular organelles (handled by location).
   
 cell_type:
-  - MUST correspond to a specific CL term explicitly mentioned in the text.
-  - Examples:
-      “macrophage”, “dendritic cell”, “T cell”, “B cell”, 
-      “epithelial cell”, “neuron”, “astrocyte”, “microglia”.
+  - MUST correspond to a specific CL term.
+  - name MUST NOT contain species words or adjectives.
+    If the text says "rat stem cell", extract:
+      cell_type: "stem cell"
+      contexts: species "Rattus norvegicus"
   - MUST provide a CL-based description.
-  - Cell states (“activated T cell”, “immature dendritic cell”) are allowed
-    ONLY if directly appearing in the text.
-  - SHOULD NOT include species name inside the cell-type token
-    (e.g., "human macrophage" → cell_type: “macrophage”, species: “Homo sapiens”).
+    
+cell_line:
+  - MUST correspond to a specific named cell line.
+    (e.g., "HeLa", "HEK293", "Jurkat", "CHO cells").
+  - name MUST be exactly the cell line name without species words.
+  - MUST provide a cell-line description (from Cellosaurus/CLO-style definition).
+  - Species MUST NOT appear in the name.
+  - SHOULD include species as a meta entry when known or implied
+    (e.g., HeLa -> Homo sapiens).
 
 ============================================================
 RELATION RULES:
@@ -286,8 +292,8 @@ def process_one_folder_llm_get_relations(
             # 没有任何匹配文件，直接跳过（不算一个样本）
             return None, [
                 {
-                    "type": "status",
-                    "name": f"skip pmid:{pmid} (no file startswith '{require_file}')",
+                    "type": "error",
+                    "msg": f"skip pmid:{pmid} (no file startswith '{require_file}')",
                 },
                 {"type": "metric", "correct": 0, "total": 0},
             ]
@@ -304,8 +310,8 @@ def process_one_folder_llm_get_relations(
             if df.empty or len(df) == 0:
                 return None, [
                     {
-                        "type": "status",
-                        "name": f"skip pmid:{pmid} (empty TSV: {candidates[0]})",
+                        "type": "error",
+                        "msg": f"skip pmid:{pmid} (empty TSV: {candidates[0]})",
                     },
                     {"type": "metric", "correct": 0, "total": 0},
                 ]
@@ -314,10 +320,9 @@ def process_one_folder_llm_get_relations(
             # 依赖 TSV 读失败，也选择跳过（当作“条件不满足”，而不是 hard error）
             return None, [
                 {
-                    "type": "status",
-                    "name": f"skip pmid:{pmid} (fail to read {candidates[0]})",
+                    "type": "error",
+                    "msg": f"skip pmid:{pmid} (fail to read {candidates[0]})",
                 },
-                {"type": "error", "msg": str(e)},
                 {"type": "metric", "correct": 0, "total": 0},
             ]
     # -----------------------------
@@ -334,13 +339,12 @@ def process_one_folder_llm_get_relations(
             with open(out_path, "w", encoding="utf-8") as fw:
                 json.dump(data, fw, ensure_ascii=False, indent=2)
             return data, [
-                {"type": "status", "name": f"missing abstract.tsv pmid:{pmid}"},
+                {"type": "error", "msg": f"missing abstract.tsv pmid:{pmid}"},
                 {"type": "metric", "correct": 0, "total": 1},
             ]
         except Exception as e:
             return None, [
-                {"type": "status", "name": f"write fail pmid:{pmid}"},
-                {"type": "error", "msg": str(e)},
+                {"type": "error", "msg": f"write fail pmid:{pmid}"},
                 {"type": "metric", "correct": 0, "total": 1},
             ]
 
@@ -357,8 +361,7 @@ def process_one_folder_llm_get_relations(
                     break
     except Exception as e:
         return None, [
-            {"type": "status", "name": f"read tsv fail pmid:{pmid}"},
-            {"type": "error", "msg": str(e)},
+            {"type": "error", "msg": f"read tsv fail pmid:{pmid}"},
             {"type": "metric", "correct": 0, "total": 1},
         ]
 
@@ -376,13 +379,12 @@ def process_one_folder_llm_get_relations(
             with open(out_path, "w", encoding="utf-8") as fw:
                 json.dump(data, fw, ensure_ascii=False, indent=2)
             return data, [
-                {"type": "status", "name": f"empty abstract pmid:{pmid}"},
+                {"type": "error", "msg": f"empty abstract pmid:{pmid}"},
                 {"type": "metric", "correct": 0, "total": 1},
             ]
         except Exception as e:
             return None, [
-                {"type": "status", "name": f"write fail pmid:{pmid}"},
-                {"type": "error", "msg": str(e)},
+                {"type": "error", "msg": f"write fail pmid:{pmid}"},
                 {"type": "metric", "correct": 0, "total": 1},
             ]
 
@@ -426,26 +428,21 @@ def process_one_folder_llm_get_relations(
             "relations": None,
             "error": str(e),
         }
-        ok = False
+        return data, [
+            {"type": "error", "msg": f"{pmid}: {str(e)}"},
+            {"type": "metric", "correct": 0, "total": 1},
+        ]
 
     # -----------------------------
     # 写 ds.json
     # -----------------------------
-    try:
-        with open(out_path, "w", encoding="utf-8") as fw:
-            json.dump(data, fw, ensure_ascii=False, indent=2)
+    with open(out_path, "w", encoding="utf-8") as fw:
+        json.dump(data, fw, ensure_ascii=False, indent=2)
 
-        return data, [
-            {"type": "status", "name": f"processed pmid:{pmid}"},
-            {"type": "metric", "correct": 1 if ok else 0, "total": 1},
-        ]
-
-    except Exception as e:
-        return None, [
-            {"type": "status", "name": f"write fail pmid:{pmid}"},
-            {"type": "error", "msg": str(e)},
-            {"type": "metric", "correct": 0, "total": 1},
-        ]
+    return data, [
+        {"type": "status", "name": "success", "description": f"{pmid}"},
+        {"type": "metric", "correct": 1, "total": 1},
+    ]
 
 
 def delete_all_file(folder, filename):

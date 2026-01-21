@@ -1,25 +1,32 @@
-from src.services.rnacentral import process_one_folder_get_rnacentral_id
+from src.services.rnacentral import search_rnacentral
+from src.pmcad.ontology_map import Ontology, process_one_folder_get_db_id, process_one_folder_judge_db_id
 from src.pmcad.parallel_process import process_folder_parallel
 
-limit = 1024
-pmidlist=None
+search_func= lambda query: search_rnacentral(
+    query=query,
+    k=30,
+)
 
+ot = Ontology(ontology_type="RNA", db_type="rnacentral", use_species=True, search_func=search_func, filename="ds_rnacentral.json", judge_method="strict")
+
+species_ot = Ontology(ontology_type="species", db_type="taxon", filename="ds_taxon.json", judge_method="strict")
+
+
+limit = 16
+pmidlist = ["461190"]
 process_folder_parallel(
     folder="/data/wyuan/workspace/pmcdata_pro/data/pattern/rna_capping",
-    process_one_folder=process_one_folder_get_rnacentral_id,
-    relation_file="ds.json",
-    species_file="ds_tax.json",
-    output_file="ds_rnacentral.json",
+    process_one_folder=process_one_folder_get_db_id,
+    input_name="ds.json",
+    ot=ot,
+    species_ot=species_ot,
     limit=limit,
-    max_retries_per_item=10,
     workers=3,
     pmidlist=pmidlist,
-    top_candidates=30,
 )
 
 
 from src.pmcad.parallel_process import process_folder_parallel
-from src.pmcad.rnacentral_judge import process_one_folder_judge_rnacentral_id
 from src.services.llm import LLM
 
 
@@ -33,11 +40,10 @@ llm = LLM(
 folder = "/data/wyuan/workspace/pmcdata_pro/data/pattern/rna_capping"
 results = process_folder_parallel(
     folder=folder,
-    process_one_folder=process_one_folder_judge_rnacentral_id,
-    input_name="ds_rnacentral.json",
-    output_name="ds_rnacentral.json",
-    limit=limit,
+    process_one_folder=process_one_folder_judge_db_id,
+    ot=ot,
     workers=16,
-    pmidlist=pmidlist,
+    limit=limit,
     llm=llm,
+    pmidlist=pmidlist,
 )

@@ -2,14 +2,45 @@ import os
 import json
 
 
-def build_relation_validation_prompt(abstract: str, relation: dict) -> str:
+def build_relation_validation_prompt(abstract: str, relation: dict, judge_method: str) -> str:
     """
     给单条 relation 构建验证 prompt。
     LLM 必须回答 Yes 或 No。
     """
     rel_json = json.dumps(relation, ensure_ascii=False, indent=2)
 
-    return f"""
+    if judge_method == "loose":
+        return f"""
+You are a biomedical relation validator.
+
+Your task:
+Determine whether the following extracted relation is SEMANTICALLY SUPPORTED
+by the abstract, even if the direction, role (e.g., substrate vs product),
+or specificity is imperfect.
+
+Rules:
+- Answer Yes if the abstract clearly discusses a biological process or mechanism
+  that involves BOTH the component(s) and the target(s), even if:
+    - the relation direction is reversed,
+    - the role (substrate/product/regulator) is loosely stated,
+    - the relation is an abstraction of the described mechanism.
+- Answer No only if the relation is unrelated, fabricated, or contradicts the abstract.
+- Do NOT require exact wording matches.
+- Generic biological roles are acceptable
+  if the abstract clearly refers to such activity.
+- Output only one word: Yes or No.
+
+=== ABSTRACT ===
+\"\"\"{abstract}\"\"\"
+
+=== RELATION ===
+{rel_json}
+
+Output: Yes or No
+"""
+    if judge_method == "strict":
+
+        return f"""
 You are a biomedical relation validator.
 
 Your task:
@@ -18,10 +49,6 @@ Determine whether the following extracted relation is TRUE based ONLY on the abs
 Rules:
 - Answer Yes if the relation can be reasonably inferred from the abstract.
 - Logical abstraction and weakening are allowed (the relation may be less specific or less strong than the wording in the abstract).
-- Do NOT require exact wording matches between the relation and the abstract.
-- The entities (gene, protein, RNA, GO term) must be sufficiently specific within the context of this abstract:
-    - A knowledgeable reader should be able to tell exactly which biological entity is being referred to.
-    - Context-specific terms (e.g., viral proteins in a virus paper) are acceptable.
 - Output only one word: Yes or No.
 
 === ABSTRACT ===
@@ -33,7 +60,9 @@ Rules:
 Output: Yes or No
 """
 
-def process_one_folder(folder: str, input_name: str, output_name: str, llm, skip_existing=True):
+def process_one_folder(
+    folder: str, input_name: str, output_name: str, llm, skip_existing=True, judge_method="strict",
+):
     """
     Validates nested relations (relations → rel_from_this_sent list).
     - For each relation in each sentence, if no 'valid' field, query LLM to verify.
@@ -49,8 +78,7 @@ def process_one_folder(folder: str, input_name: str, output_name: str, llm, skip
             data = json.load(f)
     except Exception as e:
         return None, [
-            {"type": "status", "name": f"load fail pmid: {pmid}"},
-            {"type": "error", "msg": str(e)},
+            {"type": "error", "msg": f"load fail pmid: {pmid}"},
             {"type": "metric", "correct": 0, "total": 1},
         ]
 
@@ -71,7 +99,7 @@ def process_one_folder(folder: str, input_name: str, output_name: str, llm, skip
 
     if skip_existing and total == correct and total > 0:
         return None, [
-            {"type": "status", "name": f"skip pmid: {pmid} (already validated)"},
+            {"type": "error", "msg": f"skip pmid: {pmid} (already validated)"},
             {"type": "metric", "correct": correct, "total": total},
         ]
 
@@ -82,7 +110,7 @@ def process_one_folder(folder: str, input_name: str, output_name: str, llm, skip
             if skip_existing and "valid" in rel:
                 continue
 
-            prompt = build_relation_validation_prompt(abstract, rel)
+            prompt = build_relation_validation_prompt(abstract, rel, judge_method=judge_method)
             try:
                 resp = llm.query(prompt).strip()
                 is_valid = resp.lower().startswith("y")
@@ -99,8 +127,7 @@ def process_one_folder(folder: str, input_name: str, output_name: str, llm, skip
             json.dump(data, fw, ensure_ascii=False, indent=2)
     except Exception as e:
         return None, [
-            {"type": "status", "name": f"write fail pmid: {pmid}"},
-            {"type": "error", "msg": str(e)},
+            {"type": "error", "msg": f"write fail pmid: {pmid}"},
             {"type": "metric", "correct": correct, "total": total},
         ]
 
@@ -114,7 +141,7 @@ def process_one_folder(folder: str, input_name: str, output_name: str, llm, skip
     )
 
     info = [
-        {"type": "status", "name": f"pmid: {pmid}"},
+        {"type": "status", "name": "success", "description": f"pmid: {pmid}"},
         {"type": "metric", "correct": correct, "total": total},
     ]
     return data, info

@@ -8,18 +8,10 @@ import requests
 # =====================================
 # UniProt search
 # =====================================
-def uniprot_query(term, organism=None, max_sleep=30, max_retries_per_item=5, top_k=5):
+def uniprot_query(query, max_sleep=30, max_retries_per_item=5, k=5):
     base_url = "https://rest.uniprot.org/uniprotkb/search"
 
-    term = re.sub(r"\([^)]*\)", "", str(term))
-    term = re.sub(r"\[[^\]]*\]", "", term)
-
-    if organism:
-        q = f"{term} {organism}"
-    else:
-        q = term
-
-    params = {"query": q, "format": "json", "size": top_k}
+    params = {"query": query, "format": "json", "size": k}
     sleep_time = 1
 
     for _ in range(max_retries_per_item):
@@ -38,7 +30,7 @@ def uniprot_query(term, organism=None, max_sleep=30, max_retries_per_item=5, top
 
             data = r.json()
             results = data.get("results") or []
-            return {"results": results[:top_k], "timeout": False}
+            return {"results": results[:k], "timeout": False}
 
         except Exception:
             time.sleep(sleep_time)
@@ -95,6 +87,30 @@ def extract_uniprot_info(entry, rank):
         "description": " | ".join(desc),
         "rank": rank,
     }
+
+def search_uniprot(query, k=30, max_retries_per_item=5, max_sleep=30):
+    try:
+        res = uniprot_query(
+            query=query,
+            max_sleep=max_sleep,
+            max_retries_per_item=max_retries_per_item,
+            k=k,
+        )
+        hits_raw = res.get("results") or []
+    except Exception:
+        hits_raw = []
+    hits = []
+    for rank, entry in enumerate(hits_raw, start=1):
+        info = extract_uniprot_info(entry, rank)
+        hits.append(
+            {
+                "id": info["accession"],
+                "name": info["accession"],
+                "description": info["description"],
+                "rank": rank,
+            }
+        )
+    return hits
 
 
 # =====================================

@@ -31,29 +31,32 @@ splade_model = SparseEncoder(
 # splade_model = SparseEncoder("NeuML/pubmedbert-base-splade")
 "./bin/elasticsearch"
 
-from src.pmcad.go_map import process_one_folder_get_go_id
-from src.pmcad.go_judge import process_one_folder_judge_go_id
-from src.pmcad.go_search import search_go
+from src.pmcad.ontology_map import process_one_folder_get_db_id, process_one_folder_judge_db_id, search_ontology, Ontology
 from src.pmcad.parallel_process import process_folder_parallel
 from src.services.llm import LLM
 
+search_func= lambda query: search_ontology(
+    query=query,
+    search_type="dense+splade",
+    index_name="go_index",
+    config_path=ES_CONFIG,
+    dense_model=dense_model,
+    splade_model=splade_model,
+    k=30,
+    verbose=False,
+)
+
+ot = Ontology(ontology_type="GO", db_type="go", search_func=search_func, filename="ds_go.json", judge_method="strict")
+
 folder = "/data/wyuan/workspace/pmcdata_pro/data/pattern/rna_capping"
-limit = 1024
+limit = 16
 process_folder_parallel(
     folder=folder, 
-    process_one_folder=process_one_folder_get_go_id,
+    process_one_folder=process_one_folder_get_db_id,
     workers=32, 
     input_name="ds.json", 
-    output_name="ds_go.json",
     limit=limit,
-    search_func= lambda query: search_go(
-        query=query,
-        config_path=ES_CONFIG,
-        dense_model=dense_model,
-        splade_model=splade_model,
-        k=30,
-        verbose=False,
-    )
+    ot=ot,
 )
 llm = LLM(
     model_name="deepseek-chat",
@@ -63,9 +66,8 @@ llm = LLM(
 )
 results = process_folder_parallel(
     folder=folder,
-    process_one_folder=process_one_folder_judge_go_id,
-    input_name="ds_go.json",
-    output_name="ds_go.json",
+    process_one_folder=process_one_folder_judge_db_id,
+    ot=ot,
     workers=16,
     limit=limit,
     llm=llm

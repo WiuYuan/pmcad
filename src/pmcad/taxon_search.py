@@ -6,7 +6,7 @@ def search_taxon(
     query,
     index_name="taxon_index",
     k=20,
-    verbose=True,
+    verbose=False,
 ):
     """
     Exact token matching + name length scoring

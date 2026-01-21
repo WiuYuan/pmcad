@@ -56,7 +56,7 @@ class LLM:
         }
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": prompt + " /no_think"},
         ]
         if self.temperature is None:
             payload = {
@@ -78,14 +78,12 @@ class LLM:
                 self.llm_url,
                 headers=headers,
                 json=payload,
-                timeout=60,
             )
         else:
             response = requests.post(
                 self.llm_url,
                 headers=headers,
                 json=payload,
-                timeout=60,
                 proxies=self.proxies,  # ← 加在这里
             )
 
@@ -94,7 +92,7 @@ class LLM:
 
         if self.format == "ollama":
             text = data.get("message", {}).get("content", "")
-        elif self.format == "openai":
+        elif self.format in ["openai", "qwen"]:
             text = data["choices"][0]["message"]["content"]
         else:
             text = str(data)

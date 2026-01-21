@@ -21,52 +21,58 @@ dense_model = SentenceTransformer(
     "/data/wyuan/.cache/huggingface/hub/models--pritamdeka--BioBERT-mnli-snli-scinli-scitail-mednli-stsb/snapshots/82d44689be9cf3c6c6a6f77cc3171c93282873a1",
     device=device
 )
+# dense_model = SentenceTransformer("pritamdeka/BioBERT-mnli-snli-scinli-scitail-mednli-stsb")
+
 # SPLADE model
 splade_model = SparseEncoder(
     model_name_or_path="/data/wyuan/.cache/huggingface/hub/models--NeuML--pubmedbert-base-splade/snapshots/f284fcbafe4761108f27357f5278d846a630059e",
     device=device
 )
+# splade_model = SparseEncoder("NeuML/pubmedbert-base-splade")
+"./bin/elasticsearch"
 
-
-from src.pmcad.db_change import process_one_folder_convert_failed
+from src.pmcad.ontology_map import process_one_folder_get_db_id, process_one_folder_judge_db_id, search_ontology, Ontology
 from src.pmcad.parallel_process import process_folder_parallel
 from src.services.llm import LLM
 
-from src.pmcad.ontology_map import search_ontology, Ontology
-from src.pmcad.parallel_process import process_folder_parallel
-from src.services.llm import LLM
-
-search_func_so= lambda query: search_ontology(
+search_func= lambda query: search_ontology(
     query=query,
     search_type="dense+splade",
-    index_name="so_index",
+    index_name="mesh_index",
     config_path=ES_CONFIG,
     dense_model=dense_model,
     splade_model=splade_model,
     k=30,
     verbose=False,
 )
+predix = "cpr"
+db_type = "mesh"
 
-src_ot = Ontology(ontology_type="RNA", db_type="rnacentral", use_species=True, filename="ds_rnacentral.json", judge_method="strict")
-tgt_ot = Ontology(ontology_type="SO", db_type="so", search_func=search_func_so, filename="ds_so.json", judge_method="strict")
+ot = Ontology(ontology_type="NOT KNOWN", db_type=db_type, search_func=search_func, filename=f"{predix}_{db_type}.json", judge_method="strict")
 
-folder = "/data/wyuan/workspace/pmcdata_pro/data/pattern/rna_capping"
-limit = 1024
+folder = "/data/wyuan/workspace/pmcdata_pro/data/pattern/chemprot_test"
+limit = 16
+process_folder_parallel(
+    folder=folder, 
+    process_one_folder=process_one_folder_get_db_id,
+    workers=32, 
+    input_name=f"{predix}.json", 
+    limit=limit,
+    pmidlist=["23524663"],
+    ot=ot,
+)
 llm = LLM(
     model_name="deepseek-chat",
     llm_url="https://api.deepseek.com/chat/completions",
     api_key="sk-b1a56f9730e44715a64d31364f508593",
     format="openai",
 )
-pmidlist = ["461190"]
-process_folder_parallel(
-    folder=folder, 
-    process_one_folder=process_one_folder_convert_failed,
-    workers=16, 
-    ds_json_name="ds.json",
-    src_ot=src_ot,
-    tgt_ot=tgt_ot,
+results = process_folder_parallel(
+    folder=folder,
+    process_one_folder=process_one_folder_judge_db_id,
+    ot=ot,
+    workers=16,
     limit=limit,
-    llm=llm,
-    pmidlist=pmidlist,
+    pmidlist=["23524663"],
+    llm=llm
 )
