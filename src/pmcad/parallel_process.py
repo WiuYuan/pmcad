@@ -5,6 +5,7 @@ import concurrent.futures
 import threading
 from typing import Union
 from pathlib import Path
+from src.pmcad.pmidstore import PMIDStore
 
 
 def process_one_folder_delete_file(folder: str, filename: str):
@@ -171,7 +172,7 @@ def process_one_folder_merge_json(
 
 
 def process_folder_parallel(
-    folder: str,
+    store: PMIDStore,
     process_one_folder: Union[list[callable], callable],
     workers: int = 16,
     pmidlist: list = None,
@@ -199,7 +200,7 @@ def process_folder_parallel(
 
     step_sems = [threading.Semaphore(n) for n in max_worker_list]
         
-    def _run_pipeline(path):
+    def _run_pipeline(pmid):
         final_result = None
         all_info_list = []
 
@@ -213,9 +214,9 @@ def process_folder_parallel(
             prefix = "" if idx == 1 else f"{idx}_"
 
             try:
-                result, info_list = fn(path, **kwargs)
+                result, info_list = fn(pmid, store, **kwargs)
             except Exception as e:
-                result, info_list = None, [{"type": "error", "msg": f"Extra: {Path(path).name} {str(e)}"}]
+                result, info_list = None, [{"type": "error", "msg": f"Extra: {pmid} {str(e)}"}]
             finally:
                 sem.release()
 
@@ -232,22 +233,16 @@ def process_folder_parallel(
                 break
 
         return final_result, all_info_list
-    leaf_folders = []
-    for root, dirs, files in os.walk(folder):
-        # 如果当前目录没有子文件夹，则它是一个叶子文件夹
-        if not dirs and root != folder:  # 排除根文件夹本身
-            leaf_folders.append(root)
-
-    print(f"Total leaf folders detected: {len(leaf_folders)}")
-
-    pmid_paths = {}
-    for path in leaf_folders:
-        pmid = os.path.basename(path)  # 获取文件夹名称作为PMID
-        if pmidlist is not None and pmid not in pmidlist:
-            continue
-        pmid_paths[pmid] = path
+    
+    db_pmids = store.get_pmids()
+    if pmidlist is not None:
+        pmidset = {int(p) for p in pmidlist}
+        db_pmids = [p for p in db_pmids if p in pmidset]
+        
     if limit is not None:
-        pmid_paths = dict(list(pmid_paths.items())[:limit])
+        db_pmids = db_pmids[:limit]
+
+    print(f"Total pmidss detected: {len(db_pmids)}")
 
     results = {}
     postfix = {}
@@ -259,11 +254,11 @@ def process_folder_parallel(
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
 
         futures = {
-            executor.submit(_run_pipeline, path): pmid
-            for pmid, path in pmid_paths.items()
+            executor.submit(_run_pipeline, pmid): pmid
+            for pmid in db_pmids
         }
 
-        pbar = tqdm(total=len(futures), desc="Processing folders", dynamic_ncols=True)
+        pbar = tqdm(total=len(futures), desc="Processing pmids", dynamic_ncols=True)
 
         for future in concurrent.futures.as_completed(futures):
 

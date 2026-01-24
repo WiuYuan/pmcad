@@ -47,53 +47,58 @@ class LLM:
         return text.strip()
 
     def query(self, prompt: str, system_prompt: str = "", verbose: bool = False) -> str:
-        """
-        Send a prompt to the model and return its textual response.
-        """
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt + " /no_think"},
-        ]
-        if self.temperature is None:
+
+        # ====== 根据 format 构造 payload ======
+        if self.format == "openai_completion":
+            full_prompt = prompt
+            if system_prompt:
+                full_prompt = system_prompt.strip() + "\n\n" + prompt
+
+            payload = {
+                "model": self.model_name,
+                "prompt": full_prompt,
+            }
+            if self.temperature is not None:
+                payload["temperature"] = self.temperature
+
+        else:
+            # chat / ollama / openai-chat
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt + " /no_think"},
+            ]
             payload = {
                 "model": self.model_name,
                 "messages": messages,
                 "stream": False,
             }
-        else:
-            payload = {
-                "model": self.model_name,
-                "messages": messages,
-                "stream": False,
-                "temperature": self.temperature,
-            }
+            if self.temperature is not None:
+                payload["temperature"] = self.temperature
 
-        # ========= 关键点：加入 proxies = self.proxies =========
-        if self.proxies is None:
-            response = requests.post(
-                self.llm_url,
-                headers=headers,
-                json=payload,
-            )
-        else:
-            response = requests.post(
-                self.llm_url,
-                headers=headers,
-                json=payload,
-                proxies=self.proxies,  # ← 加在这里
-            )
-
+        # ====== 发送请求 ======
+        response = requests.post(
+            self.llm_url,
+            headers=headers,
+            json=payload,
+            proxies=self.proxies,
+        )
         response.raise_for_status()
         data = response.json()
 
-        if self.format == "ollama":
+        # ====== 解析返回 ======
+        if self.format == "openai_completion":
+            text = data["choices"][0]["text"]
+
+        elif self.format == "ollama":
             text = data.get("message", {}).get("content", "")
+
         elif self.format in ["openai", "qwen"]:
             text = data["choices"][0]["message"]["content"]
+
         else:
             text = str(data)
 

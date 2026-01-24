@@ -7,6 +7,7 @@ import pandas as pd
 from nltk.tokenize import sent_tokenize
 import nltk
 from src.services.llm import LLM
+from src.pmcad.pmidstore import PMIDStore
 
 # nltk.download("punkt", quiet=True)
 # nltk.download("punkt_tab", quiet=True)
@@ -266,7 +267,7 @@ def extract_json_array(raw: str):
     return raw[start:end + 1]
 
 def process_one_folder_llm_get_relations(
-    folder: str, output_file_name: str, llm: LLM, require_file: str | None = None
+    pmid: int, store: PMIDStore, output_file_name: str, llm: LLM
 ):
     """
     process_folder_parallel 专用的 process_one_folder：
@@ -275,96 +276,8 @@ def process_one_folder_llm_get_relations(
     - 调用 LLM → 得到关系 → 写 output_file_name
     - 返回 (result, info_list)
     """
-
-    pmid = os.path.basename(folder)
-    tsv_path = os.path.join(folder, "abstract.tsv")
-    out_path = os.path.join(folder, output_file_name)
-
-    if require_file is not None:
-        # 找到以 require_file 开头的所有文件
-        candidates = [
-            fname
-            for fname in os.listdir(folder)
-            if fname.startswith(require_file) and fname.endswith(".tsv")
-        ]
-
-        if not candidates:
-            # 没有任何匹配文件，直接跳过（不算一个样本）
-            return None, [
-                {
-                    "type": "error",
-                    "msg": f"skip pmid:{pmid} (no file startswith '{require_file}')",
-                },
-                {"type": "metric", "correct": 0, "total": 0},
-            ]
-
-        # 这里简单地取第一个匹配的文件，如果你有多种版本命名规则，可以在这里再排个序
-        dep_path = os.path.join(folder, candidates[0])
-
-        try:
-            df = pd.read_csv(dep_path, sep="\t")
-
-            # 示例：你的文件头类似
-            # Unnamed: 0.1  Unnamed: 0  pmid  gene  species  function  GO_ID  GO_name  gene_ids
-            # “读取之后什么都没有” → df 只有表头、没有数据行
-            if df.empty or len(df) == 0:
-                return None, [
-                    {
-                        "type": "error",
-                        "msg": f"skip pmid:{pmid} (empty TSV: {candidates[0]})",
-                    },
-                    {"type": "metric", "correct": 0, "total": 0},
-                ]
-
-        except Exception as e:
-            # 依赖 TSV 读失败，也选择跳过（当作“条件不满足”，而不是 hard error）
-            return None, [
-                {
-                    "type": "error",
-                    "msg": f"skip pmid:{pmid} (fail to read {candidates[0]})",
-                },
-                {"type": "metric", "correct": 0, "total": 0},
-            ]
-    # -----------------------------
-    # 读取 abstract.tsv
-    # -----------------------------
-    if not os.path.exists(tsv_path):
-        data = {
-            "pmid": pmid,
-            "abstract": None,
-            "relations": None,
-            "error": "abstract.tsv not found",
-        }
-        try:
-            with open(out_path, "w", encoding="utf-8") as fw:
-                json.dump(data, fw, ensure_ascii=False, indent=2)
-            return data, [
-                {"type": "error", "msg": f"missing abstract.tsv pmid:{pmid}"},
-                {"type": "metric", "correct": 0, "total": 1},
-            ]
-        except Exception as e:
-            return None, [
-                {"type": "error", "msg": f"write fail pmid:{pmid}"},
-                {"type": "metric", "correct": 0, "total": 1},
-            ]
-
-    # -----------------------------
-    # 从 TSV 查找对应 PMID 的 abstract
-    # -----------------------------
-    abstract = None
-    try:
-        with open(tsv_path, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f, delimiter="\t")
-            for row in reader:
-                if row.get("pmid") == pmid:
-                    abstract = row.get("content", "").strip()
-                    break
-    except Exception as e:
-        return None, [
-            {"type": "error", "msg": f"read tsv fail pmid:{pmid}"},
-            {"type": "metric", "correct": 0, "total": 1},
-        ]
-
+    pmid = int(pmid)
+    abstract = store.get_abstract(pmid)
     # -----------------------------
     # abstract 缺失或为空
     # -----------------------------
@@ -376,8 +289,7 @@ def process_one_folder_llm_get_relations(
             "error": "Empty or missing abstract in TSV",
         }
         try:
-            with open(out_path, "w", encoding="utf-8") as fw:
-                json.dump(data, fw, ensure_ascii=False, indent=2)
+            store.put(pmid, output_file_name, data)
             return data, [
                 {"type": "error", "msg": f"empty abstract pmid:{pmid}"},
                 {"type": "metric", "correct": 0, "total": 1},
@@ -428,6 +340,7 @@ def process_one_folder_llm_get_relations(
             "relations": None,
             "error": str(e),
         }
+        store.put(pmid, output_file_name, data)
         return data, [
             {"type": "error", "msg": f"{pmid}: {str(e)}"},
             {"type": "metric", "correct": 0, "total": 1},
@@ -436,8 +349,7 @@ def process_one_folder_llm_get_relations(
     # -----------------------------
     # 写 ds.json
     # -----------------------------
-    with open(out_path, "w", encoding="utf-8") as fw:
-        json.dump(data, fw, ensure_ascii=False, indent=2)
+    store.put(pmid, output_file_name, data)
 
     return data, [
         {"type": "status", "name": "success", "description": f"{pmid}"},
