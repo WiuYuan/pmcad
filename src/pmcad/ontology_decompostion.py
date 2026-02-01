@@ -1,3 +1,4 @@
+# src/pmcad/ontology_decompostion.py
 import os
 import json
 
@@ -196,30 +197,28 @@ def postprocess_entity(ent: dict, llm) -> dict:
     return ent
 
 def process_one_folder_entity_decomposition(
-    folder: str,
-    input_name: str,
-    output_name: str,
+    pmid: int,
+    store,
     llm,
     *,
+    input_name: str,
+    output_name: str,
     skip_existing: bool = False,
 ):
     """
-    对已有关系抽取结果做 entity decomposition / canonicalization 的后处理。
+    基于 PMIDStore 的 entity decomposition / canonicalization 后处理（不再使用 folder 文件系统）。
 
-    - 读取 folder/input_name
-    - 对 components / targets / contexts 中的 entity 调用 LLM 判断是否需要分解
-    - 就地替换 entity
-    - 写出 folder/output_name
+    - 从 store 读取 pmid/input_name (JSON)
+    - 对 relations[*].rel_from_this_sent[*] 的 components/targets/contexts 中的 entity 调用 LLM 判断是否需要分解
+      （当前仅处理 type in ["GO", "cell_type"]，保持原逻辑）
+    - 写回 store: pmid/output_name
     """
-
-    pmid = os.path.basename(folder)
-    in_path = os.path.join(folder, input_name)
-    out_path = os.path.join(folder, output_name)
+    pmid = int(pmid)
 
     # -----------------------------
     # 0) skip_existing
     # -----------------------------
-    if skip_existing and os.path.exists(out_path):
+    if skip_existing and store.has(pmid, output_name):
         return None, [
             {
                 "type": "status",
@@ -231,42 +230,38 @@ def process_one_folder_entity_decomposition(
     # -----------------------------
     # 1) load input
     # -----------------------------
-    if not os.path.exists(in_path):
+    data = store.get(pmid, input_name)
+    if data is None:
         return None, [
             {
                 "type": "error",
-                "msg": f"missing input file pmid:{pmid} file:{input_name}",
+                "msg": f"missing input pmid:{pmid} name:{input_name}",
             },
         ]
-
-    try:
-        with open(in_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception as e:
+    if not isinstance(data, dict):
         return None, [
             {
                 "type": "error",
-                "msg": f"load fail pmid:{pmid} err:{repr(e)}",
+                "msg": f"bad input type pmid:{pmid} name:{input_name}",
             },
         ]
 
     if not data.get("relations"):
         # 没关系，直接原样写出
         try:
-            with open(out_path, "w", encoding="utf-8") as fw:
-                json.dump(data, fw, ensure_ascii=False, indent=2)
-            return data, [
+            store.put(pmid, output_name, data)
+            return None, [
                 {
                     "type": "status",
                     "name": "success",
                     "description": f"pmid:{pmid} (no relations)",
                 },
             ]
-        except Exception as e:
+        except Exception:
             return None, [
                 {
                     "type": "error",
-                    "msg": f"write fail pmid:{pmid}",
+                    "msg": f"write fail pmid:{pmid} name:{output_name}",
                 },
             ]
 
@@ -285,9 +280,11 @@ def process_one_folder_entity_decomposition(
 
                 new_ents = []
                 for ent in ents:
-                    if ent["type"] not in ["GO", "cell_type"]:
+                    ent_type = ent.get("type")
+                    if ent_type not in ["GO", "cell_type"]:
                         new_ents.append(ent)
                         continue
+
                     total_ents += 1
                     try:
                         new_ent = postprocess_entity(ent, llm)
@@ -300,45 +297,39 @@ def process_one_folder_entity_decomposition(
                 rel[k] = new_ents
 
     # -----------------------------
-    # 3) 写回
+    # 3) 写回 store
     # -----------------------------
     data.setdefault("_entity_normalization_report", {})
-    data["_entity_normalization_report"].update({
-        "pmid": pmid,
-        "total_entities": total_ents,
-        "rewritten_entities": rewritten_ents,
-        "rewrite_ratio": (rewritten_ents / total_ents) if total_ents else 0.0,
-        "mode": "llm_entity_decomposition",
-    })
+    data["_entity_normalization_report"].update(
+        {
+            "pmid": pmid,
+            "total_entities": total_ents,
+            "rewritten_entities": rewritten_ents,
+            "rewrite_ratio": (rewritten_ents / total_ents) if total_ents else 0.0,
+            "mode": "llm_entity_decomposition",
+            "input_name": input_name,
+            "output_name": output_name,
+        }
+    )
 
-    with open(out_path, "w", encoding="utf-8") as fw:
-        json.dump(data, fw, ensure_ascii=False, indent=2)
-        
-    if rewritten_ents == 0:
-        return data, [
-            {
-                "type": "status",
-                "name": "maintained",
-                "description": f"pmid:{pmid}",
-            },
-            {
-                "type": "metric",
-                "name": "rewrite",
-                "correct": rewritten_ents,
-                "total": total_ents,
-            },
+    try:
+        store.put(pmid, output_name, data)
+    except Exception as e:
+        return None, [
+            {"type": "error", "msg": f"write fail pmid:{pmid} err:{repr(e)}"},
         ]
-    else:
-        return data, [
-            {
-                "type": "status",
-                "name": "success",
-                "description": f"pmid:{pmid}",
-            },
-            {
-                "type": "metric",
-                "name": "rewrite",
-                "correct": rewritten_ents,
-                "total": total_ents,
-            },
-        ]
+
+    status_name = "maintained" if rewritten_ents == 0 else "success"
+    return None, [
+        {
+            "type": "status",
+            "name": status_name,
+            "description": f"pmid:{pmid}",
+        },
+        {
+            "type": "metric",
+            "name": "rewrite",
+            "correct": rewritten_ents,
+            "total": total_ents,
+        },
+    ]

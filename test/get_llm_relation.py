@@ -1,31 +1,37 @@
+# test/get_llm_relation.py
+import os
 from src.services.llm import LLM
 from src.pmcad.parallel_process import process_folder_parallel
 from src.pmcad.extract_relations import process_one_folder_llm_get_relations
+from src.pmcad.pmidstore import PMIDStore
 
-llm = LLM(
-    model_name="deepseek-chat",
-    llm_url="https://api.deepseek.com/chat/completions",
-    api_key="sk-b1a56f9730e44715a64d31364f508593",
-    format="openai",
-)
+DB_PATH = "/data/wyuan/workspace/pmcdata_pro/pmid_abs.sqlite3"
+DONE_QUEUE_NAME = "llm_relations_qwen3"
+OUTPUT_FILE_NAME = "qw.json"
 
-llm = LLM(
-    model_name="qwen3-32b",
-    llm_url="https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-    api_key="sk-46aa8d44210c46678de14c0a631d2b5c",
-    format="qwen",
-)
+# 你本地起了两个 openai-compatible server：18001 / 18002
+# model_name 默认用你 curl 里看到的 id（也可用环境变量覆盖）
+llm_list = [
+    LLM(
+        model_name="qwen3-14b",
+        llm_url="http://0.0.0.0:18001/v1/chat/completions",
+        format="openai",
+    )
+]
 
-# pmidlist = ["27427769", "18495773", "18305027", "17267492", "20862256", "22022449", "19850911", "26098995", "18571739", "16912287"]
-pmidlist = ["14716684"]
-pmidlist = None
+store = PMIDStore(DB_PATH, readonly=False)
+# store.queue_done_clear(DONE_QUEUE_NAME)
+
+pmidlist = None  # None => 跑完整个 DB 的 pmids；也可传 list[int] 控制子集
 process_folder_parallel(
-    "/data/wyuan/workspace/pmcdata_pro/data/pattern/chemprot_test",
-    process_one_folder_llm_get_relations,
-    workers=10,
-    output_file_name="qw.json",
-    llm=llm,
+    store=store,
+    llm_list=llm_list,
+    process_one_folder=process_one_folder_llm_get_relations,
+    workers=32,
     pmidlist=pmidlist,
+    output_file_name=OUTPUT_FILE_NAME,  # 传给 process_one_folder_llm_get_relations
+    op_queue_names=None,                # 按你的要求：不使用 op 队列
+    done_queue_name=DONE_QUEUE_NAME,    # 用 done 队列做断点/去重
+    clear_done_on_start=True,
     # limit=1,
-    # require_file="final_file_old"
 )

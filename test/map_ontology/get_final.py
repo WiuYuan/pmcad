@@ -1,101 +1,56 @@
+
+# test/map_ontology/get_final.py
+"""
+最终汇总阶段（DB + Queue mode）：
+- 读取：qw_decomposed.json
+- 结合各 ontology stage 的 llm_best_match
+- 输出：qw_final.json
+
+要求：
+- op_queue_names = test/map_ontology/map_all_ontology.py 中“所有 stage 的 done queue”（map + conv + 上游 done）
+- 代码尽量精简，删除不需要的依赖与模型加载
+"""
+
 import os
-import json
-import requests
-import pandas as pd
-from tqdm import tqdm
-import numpy as np
-import torch
+from typing import List, Tuple
 
-from sentence_transformers import SentenceTransformer
-from sentence_transformers import SparseEncoder
-
-
-# ============================================================
-# Elasticsearch config
-# ============================================================
-ES_CONFIG = "/data/wyuan/workspace/pmcdata_pro/pmcad/config/elasticsearch.yaml"
-
-device = "cpu"
-# Dense model
-dense_model = SentenceTransformer(
-    "/data/wyuan/.cache/huggingface/hub/models--pritamdeka--BioBERT-mnli-snli-scinli-scitail-mednli-stsb/snapshots/82d44689be9cf3c6c6a6f77cc3171c93282873a1",
-    device=device,
-)
-# dense_model = SentenceTransformer("pritamdeka/BioBERT-mnli-snli-scinli-scitail-mednli-stsb")
-
-# SPLADE model
-splade_model = SparseEncoder(
-    model_name_or_path="/data/wyuan/.cache/huggingface/hub/models--NeuML--pubmedbert-base-splade/snapshots/f284fcbafe4761108f27357f5278d846a630059e",
-    device=device,
-)
-# splade_model = SparseEncoder("NeuML/pubmedbert-base-splade")
-"./bin/elasticsearch"
-
-from src.pmcad.ontology_map import (
-    process_one_folder_get_db_id,
-    process_one_folder_apply_llm_best,
-    process_one_folder_judge_db_id,
-    search_ontology,
-    Ontology,
-)
+from src.pmcad.pmidstore import PMIDStore
 from src.pmcad.parallel_process import process_folder_parallel
-from src.services.llm import LLM
-from src.services.uniprot import search_uniprot
-from src.services.rnacentral import search_rnacentral
-from src.services.chebi import search_chebi
-from src.pmcad.taxon_search import search_taxon
-from src.pmcad.db_change import process_one_folder_convert_failed
+from src.pmcad.ontology_map import Ontology, process_one_folder_apply_llm_best
+
 
 # ============================================================
-# ontology config
+# DB / files
 # ============================================================
-FILE_PREFIX = "ds"
+DB_PATH = os.environ.get("PMCAD_DB_PATH", "/data/wyuan/workspace/pmcdata_pro/pmid_abs.sqlite3")
+
+FILE_PREFIX = "qw"
+CORE_FILE_NAME = f"{FILE_PREFIX}_decomposed.json"
+OUTPUT_NAME = f"{FILE_PREFIX}_final.json"
 
 
-def build_search_func(db_type):
-    # ---- special DBs ----
-    if db_type in ["uniprot", "rnacentral", "taxon"]:
-        if db_type == "uniprot":
-            return lambda query: search_uniprot(query=query, k=30)
-        if db_type == "rnacentral":
-            return lambda query: search_rnacentral(query=query, k=30)
-        if db_type == "taxon":
-            return lambda query: search_taxon(config_path=ES_CONFIG, query=query, k=30)
+# ============================================================
+# Queue names (必须与 test/map_ontology/map_all_ontology.py 保持一致)
+# ============================================================
+UPSTREAM_DONE_QUEUE_NAME = "llm_relations_qwen3_decomp"
 
-        raise ValueError(f"Unknown special search builder: {db_type}")
+def q_map(db_type: str) -> str:
+    return f"{FILE_PREFIX}__map__{db_type}"
 
-    # ---- default ontology DBs ----
-    extra_source_fields=None
-    if db_type == "cvcl":
-        extra_source_fields = ["species"]
-    return lambda query: search_ontology(
-        query=query,
-        search_type="dense+splade",
-        index_name=f"{db_type}_index",
-        config_path=ES_CONFIG,
-        dense_model=dense_model,
-        splade_model=splade_model,
-        k=30,
-        extra_source_fields=extra_source_fields,
-        verbose=False,
-    )
+def q_conv(src_db: str, tgt_db: str) -> str:
+    return f"{FILE_PREFIX}__conv__{src_db}__to__{tgt_db}"
+
+FINAL_DONE_QUEUE_NAME = f"{FILE_PREFIX}__final"
 
 
-def build_ontology(cfg, judge_method="strict", use_species=False):
-    db_type = cfg["db_type"]
-
-    return Ontology(
-        ontology_type=cfg["ontology_type"],
-        db_type=db_type,
-        search_func=build_search_func(db_type),
-        filename=f"{FILE_PREFIX}_{db_type}.json",
-        judge_method=judge_method,
-        use_species=use_species,
-    )
-
-
+# ============================================================
+# Ontology list (apply_llm_best 只用到 filename / type / use_species)
+# 不需要 search model / ES config
+# ============================================================
 ONTOLOGY_CONFIGS = [
     {"ontology_type": "MeSH", "db_type": "mesh"},
+    {"ontology_type": "species", "db_type": "taxon"},
+    {"ontology_type": "cell_line", "db_type": "cvcl"},
     {"ontology_type": "cell_type", "db_type": "cl"},
     {"ontology_type": ["protein", "gene"], "db_type": "uniprot"},
     {"ontology_type": "RNA", "db_type": "rnacentral"},
@@ -106,43 +61,100 @@ ONTOLOGY_CONFIGS = [
     {"ontology_type": "disease", "db_type": "doid"},
     {"ontology_type": "anatomy", "db_type": "uberon"},
     # {"ontology_type": "relation", "db_type": "ro"},
-    {"ontology_type": "cell_line", "db_type": "cvcl"},
-    {"ontology_type": "species", "db_type": "taxon"},
 ]
 
-ontologies = []
+def _use_species_for_db(db_type: str) -> bool:
+    return db_type in ["uniprot", "rnacentral"]
 
-for cfg in ONTOLOGY_CONFIGS:
-    if cfg["db_type"] in ["ro"]:
-        judge_method = "forced"
-    elif cfg["db_type"] in ["so", "go"]:
-        judge_method = "relaxed"
-    else:
-        judge_method = "strict"
-    if cfg["db_type"] in ["uniprot", "rnacentral"]:
-        use_species = True
-    else:
-        use_species = False
-    ontologies.append(build_ontology(cfg=cfg, judge_method=judge_method, use_species=use_species))
+def build_ontology(cfg) -> Ontology:
+    db_type = cfg["db_type"]
+    return Ontology(
+        ontology_type=cfg["ontology_type"],
+        db_type=db_type,
+        use_species=_use_species_for_db(db_type),
+        filename=f"{FILE_PREFIX}_{db_type}.json",
+        # apply_llm_best 不会调用 search_func / judge_method
+        search_func=None,
+    )
 
-species_ot = build_ontology(cfg={"ontology_type": "species", "db_type": "taxon"}, judge_method="strict", use_species=False)
-cvcl_ot = build_ontology(cfg={"ontology_type": "cell_line", "db_type": "cvcl"}, judge_method="strict", use_species=False)
+# apply 需要的 ot_list（可包含全部 ontology；即使某些类型不在 relations 中也无害）
+OT_LIST = [build_ontology(cfg) for cfg in ONTOLOGY_CONFIGS]
 
-folder = "/data/wyuan/workspace/pmcdata_pro/data/pattern/chemprot_test"
-limit = 16
-limit = None
-pmidlist = ["14716684"]
-pmidlist = None
+# species / cvcl 用于物种对齐（resolve_species / cell_line->species 兜底）
+SPECIES_OT = build_ontology({"ontology_type": "species", "db_type": "taxon"})
+CVCL_OT = build_ontology({"ontology_type": "cell_line", "db_type": "cvcl"})
 
-process_folder_parallel(
-    folder=folder,
-    process_one_folder=process_one_folder_apply_llm_best,
-    workers=32,
-    input_name="ds_decomposed.json",
-    output_name="ds_final.json",
-    limit=limit,
-    species_ot=species_ot,
-    cvcl_ot=cvcl_ot,
-    ot_list=ontologies,
-    pmidlist=pmidlist,
-)
+
+# ============================================================
+# op queues = “所有 done queues”
+# ============================================================
+def build_all_op_done_queues() -> List[str]:
+    op: List[str] = [UPSTREAM_DONE_QUEUE_NAME]
+
+    # 1) all mapping stages
+    for cfg in ONTOLOGY_CONFIGS:
+        op.append(q_map(cfg["db_type"]))
+
+    # 2) all convert stages（与 map_all_ontology.py 的 conv_deps / mesh_chain 对齐）
+    conv_pairs: List[Tuple[str, str]] = [
+        ("chebi", "uniprot"),
+        ("cl", "cvcl"),
+        ("rnacentral", "so"),
+        ("rnacentral", "go"),
+        ("rnacentral", "mesh"),
+        ("uniprot", "mesh"),
+        ("so", "mesh"),
+        ("go", "mesh"),
+        ("chebi", "mesh"),
+        ("interpro", "mesh"),
+        ("cvcl", "mesh"),
+        ("doid", "mesh"),
+        ("uberon", "mesh"),
+    ]
+    for s, t in conv_pairs:
+        op.append(q_conv(s, t))
+
+    # 去重保序
+    seen = set()
+    out = []
+    for x in op:
+        if x in seen:
+            continue
+        seen.add(x)
+        out.append(x)
+    return out
+
+OP_DONE_QUEUES = build_all_op_done_queues()
+
+
+def main(*, workers: int = 64, clear_done_on_start: bool = False):
+    store = PMIDStore(DB_PATH, readonly=False)
+    try:
+        process_folder_parallel(
+            store=store,
+            llm_list=[None],  # 本 stage 不用 llm，但 parallel_process 会透传一个 llm 参数
+            process_one_folder=process_one_folder_apply_llm_best,
+            workers=workers,
+            pmidlist=None,  # queue mode: 以 abs 表全集作为 target
+            input_name=CORE_FILE_NAME,
+            output_name=OUTPUT_NAME,
+            ot_list=OT_LIST,
+            species_ot=SPECIES_OT,
+            cvcl_ot=CVCL_OT,
+            op_queue_names=OP_DONE_QUEUES,
+            done_queue_name=FINAL_DONE_QUEUE_NAME,
+            clear_done_on_start=clear_done_on_start,
+        )
+    finally:
+        store.close()
+
+
+if __name__ == "__main__":
+    workers = int(os.environ.get("PMCAD_FINAL_WORKERS", "64"))
+    clear = True
+    print(
+        f"[get_final] DB_PATH={DB_PATH} input={CORE_FILE_NAME} output={OUTPUT_NAME} "
+        f"workers={workers} clear_done={clear} done_queue={FINAL_DONE_QUEUE_NAME}"
+    )
+    print(f"[get_final] op_queues={OP_DONE_QUEUES}")
+    main(workers=workers, clear_done_on_start=clear)

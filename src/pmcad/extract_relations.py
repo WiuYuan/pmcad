@@ -7,6 +7,7 @@ import pandas as pd
 from nltk.tokenize import sent_tokenize
 import nltk
 from src.services.llm import LLM
+from src.pmcad.pmidstore import PMIDStore
 
 # nltk.download("punkt", quiet=True)
 # nltk.download("punkt_tab", quiet=True)
@@ -30,12 +31,8 @@ def build_interleaved_background(history):
 
         blocks.append(sent)
 
-        if rels:
-            blocks.append(
-                json.dumps(rels, ensure_ascii=False, indent=2)
-            )
 
-    return "\n".join(blocks)
+    return " ".join(blocks)
 
 def build_prompt(background: str, current_sentence: str) -> str:
     """
@@ -251,22 +248,47 @@ OUTPUT RULES:
 ============================================================
 BACKGROUND (relations before the current one):
 
-{background}
+{background + ' ' + current_sentence}
 ============================================================
 CURRENT SENTENCE:
 
 {current_sentence}"""
     return prompt + article
+  
+def extract_json_array(raw: str) -> str:
+    """
+    从 LLM 输出中尽量提取出 JSON array 字符串：
+    - 正常情况：匹配到 [...] 直接返回
+    - 兼容情况：只输出了单个对象 {...} 时，自动包装成 [{...}]
+    - 允许 raw 前后有额外文本/代码块/解释
+    """
+    decoder = json.JSONDecoder()
 
-def extract_json_array(raw: str):
+    # 优先用 JSONDecoder 做“智能截取”（能处理前后有杂质文本）
+    for i, ch in enumerate(raw):
+        if ch not in "[{":
+            continue
+        try:
+            obj, end = decoder.raw_decode(raw[i:])
+        except json.JSONDecodeError:
+            continue
+
+        snippet = raw[i : i + end]
+        if isinstance(obj, list):
+            return snippet
+        if isinstance(obj, dict):
+            return "[" + snippet + "]"
+
+    # 兜底：保持原逻辑（但放最后）
     start = raw.find("[")
     end = raw.rfind("]")
-    if start == -1 or end == -1 or end < start:
-        raise ValueError("No valid JSON array found")
-    return raw[start:end + 1]
+    if start != -1 and end != -1 and end >= start:
+        return raw[start : end + 1]
+
+    raise ValueError("No valid JSON array/object found")
 
 def process_one_folder_llm_get_relations(
-    folder: str, output_file_name: str, llm: LLM, require_file: str | None = None
+    pmid: int, store: PMIDStore, output_file_name: str, llm: LLM
 ):
     """
     process_folder_parallel 专用的 process_one_folder：
@@ -275,173 +297,59 @@ def process_one_folder_llm_get_relations(
     - 调用 LLM → 得到关系 → 写 output_file_name
     - 返回 (result, info_list)
     """
-
-    pmid = os.path.basename(folder)
-    tsv_path = os.path.join(folder, "abstract.tsv")
-    out_path = os.path.join(folder, output_file_name)
-
-    if require_file is not None:
-        # 找到以 require_file 开头的所有文件
-        candidates = [
-            fname
-            for fname in os.listdir(folder)
-            if fname.startswith(require_file) and fname.endswith(".tsv")
-        ]
-
-        if not candidates:
-            # 没有任何匹配文件，直接跳过（不算一个样本）
-            return None, [
-                {
-                    "type": "error",
-                    "msg": f"skip pmid:{pmid} (no file startswith '{require_file}')",
-                },
-                {"type": "metric", "correct": 0, "total": 0},
-            ]
-
-        # 这里简单地取第一个匹配的文件，如果你有多种版本命名规则，可以在这里再排个序
-        dep_path = os.path.join(folder, candidates[0])
-
-        try:
-            df = pd.read_csv(dep_path, sep="\t")
-
-            # 示例：你的文件头类似
-            # Unnamed: 0.1  Unnamed: 0  pmid  gene  species  function  GO_ID  GO_name  gene_ids
-            # “读取之后什么都没有” → df 只有表头、没有数据行
-            if df.empty or len(df) == 0:
-                return None, [
-                    {
-                        "type": "error",
-                        "msg": f"skip pmid:{pmid} (empty TSV: {candidates[0]})",
-                    },
-                    {"type": "metric", "correct": 0, "total": 0},
-                ]
-
-        except Exception as e:
-            # 依赖 TSV 读失败，也选择跳过（当作“条件不满足”，而不是 hard error）
-            return None, [
-                {
-                    "type": "error",
-                    "msg": f"skip pmid:{pmid} (fail to read {candidates[0]})",
-                },
-                {"type": "metric", "correct": 0, "total": 0},
-            ]
-    # -----------------------------
-    # 读取 abstract.tsv
-    # -----------------------------
-    if not os.path.exists(tsv_path):
-        data = {
-            "pmid": pmid,
-            "abstract": None,
-            "relations": None,
-            "error": "abstract.tsv not found",
-        }
-        try:
-            with open(out_path, "w", encoding="utf-8") as fw:
-                json.dump(data, fw, ensure_ascii=False, indent=2)
-            return data, [
-                {"type": "error", "msg": f"missing abstract.tsv pmid:{pmid}"},
-                {"type": "metric", "correct": 0, "total": 1},
-            ]
-        except Exception as e:
-            return None, [
-                {"type": "error", "msg": f"write fail pmid:{pmid}"},
-                {"type": "metric", "correct": 0, "total": 1},
-            ]
-
-    # -----------------------------
-    # 从 TSV 查找对应 PMID 的 abstract
-    # -----------------------------
-    abstract = None
-    try:
-        with open(tsv_path, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f, delimiter="\t")
-            for row in reader:
-                if row.get("pmid") == pmid:
-                    abstract = row.get("content", "").strip()
-                    break
-    except Exception as e:
-        return None, [
-            {"type": "error", "msg": f"read tsv fail pmid:{pmid}"},
-            {"type": "metric", "correct": 0, "total": 1},
-        ]
-
-    # -----------------------------
-    # abstract 缺失或为空
-    # -----------------------------
-    if not abstract:
-        data = {
-            "pmid": pmid,
-            "abstract": abstract,
-            "relations": None,
-            "error": "Empty or missing abstract in TSV",
-        }
-        try:
-            with open(out_path, "w", encoding="utf-8") as fw:
-                json.dump(data, fw, ensure_ascii=False, indent=2)
-            return data, [
-                {"type": "error", "msg": f"empty abstract pmid:{pmid}"},
-                {"type": "metric", "correct": 0, "total": 1},
-            ]
-        except Exception as e:
-            return None, [
-                {"type": "error", "msg": f"write fail pmid:{pmid}"},
-                {"type": "metric", "correct": 0, "total": 1},
-            ]
+    pmid = int(pmid)
+    abstract = store.get_abstract(pmid)
 
     # -----------------------------
     # 调用 LLM
     # -----------------------------
+    n_total = 0
+    n_correct = 0
+    n_error = 0
     history = []
-    try:
-        all_relations = []
-        sentences = sent_tokenize(abstract)
-        for i, sent in enumerate(sentences):
-            background = build_interleaved_background(history)
-            prompt = build_prompt(background, sent)
-
+    all_relations = []
+    sentences = sent_tokenize(abstract)
+    for i, sent in enumerate(sentences):
+        n_total += 1
+        background = build_interleaved_background(history)
+        prompt = build_prompt(background, sent)
+        try:
             raw = llm.query(prompt)
+        except Exception as e:
+            n_error += 1
+            continue
 
-            try:
-                rels = json.loads(extract_json_array(raw))
-            except:
-                continue
+        try:
+            rels = json.loads(extract_json_array(raw))
+        except:
+            rels = json.loads(extract_json_array(raw))
+            print("\n"+raw+"\n")
+            continue
+          
+        n_correct += 1
 
-            all_relations.append({"sentence": sent, "rel_from_this_sent": rels})
-            history.append({
-                "sentence": sent,
-                "relations": rels
-            })
+        all_relations.append({"sentence": sent, "rel_from_this_sent": rels})
+        history.append({
+            "sentence": sent,
+            "relations": rels
+        })
 
-        data = {
-            "pmid": pmid,
-            "abstract": abstract,
-            "relations": all_relations,
-            "error": None,
-        }
-
-        ok = True
-
-    except Exception as e:
-        data = {
-            "pmid": pmid,
-            "abstract": abstract,
-            "relations": None,
-            "error": str(e),
-        }
-        return data, [
-            {"type": "error", "msg": f"{pmid}: {str(e)}"},
-            {"type": "metric", "correct": 0, "total": 1},
-        ]
+    data = {
+        "pmid": pmid,
+        "abstract": abstract,
+        "relations": all_relations,
+        "error": None,
+    }
 
     # -----------------------------
     # 写 ds.json
     # -----------------------------
-    with open(out_path, "w", encoding="utf-8") as fw:
-        json.dump(data, fw, ensure_ascii=False, indent=2)
+    store.put(pmid, output_file_name, data)
 
-    return data, [
+    return None, [
         {"type": "status", "name": "success", "description": f"{pmid}"},
-        {"type": "metric", "correct": 1, "total": 1},
+        {"type": "metric", "name": "judge", "correct": n_correct, "total": n_total},
+        {"type": "metric", "name": "llm_error", "correct": n_error, "total": n_total},
     ]
 
 

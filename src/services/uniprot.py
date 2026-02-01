@@ -1,8 +1,78 @@
+
+# src/services/uniprot.py
 import os
 import json
 import re
 import time
 import requests
+import fcntl
+
+
+# =====================================
+# Global rate limit (cross-process): max 5 requests / 1s
+# =====================================
+# 说明：
+# - test/map_ontology/map_all_ontology_net.py 会 fork 多进程
+# - 这里用文件锁实现“全局（跨进程）”限流：1 秒窗口内最多 5 次请求
+_UNIPROT_RL_RATE = int(os.getenv("UNIPROT_GLOBAL_RPS", "5"))          # 每秒最多请求数
+_UNIPROT_RL_WINDOW = float(os.getenv("UNIPROT_GLOBAL_RPS_WINDOW", "1.0"))  # 窗口大小（秒）
+_UNIPROT_RL_DIR = os.getenv("UNIPROT_GLOBAL_RL_DIR", "/tmp")
+_UNIPROT_RL_BASENAME = "uniprot_global_ratelimit"
+
+
+def _uniprot_global_rate_limit():
+    """
+    全局限流：保证所有进程合计在 _UNIPROT_RL_WINDOW 秒内最多 _UNIPROT_RL_RATE 次请求。
+    使用 fcntl.flock 文件锁（Linux/macOS 有效；当前脚本强制 fork，通常运行在类 Unix 环境）。
+    """
+    if _UNIPROT_RL_RATE <= 0:
+        return
+
+    os.makedirs(_UNIPROT_RL_DIR, exist_ok=True)
+    lock_path = os.path.join(_UNIPROT_RL_DIR, _UNIPROT_RL_BASENAME + ".lock")
+    state_path = os.path.join(_UNIPROT_RL_DIR, _UNIPROT_RL_BASENAME + ".json")
+
+    while True:
+        # 1) lock
+        with open(lock_path, "a+", encoding="utf-8") as lockf:
+            fcntl.flock(lockf.fileno(), fcntl.LOCK_EX)
+
+            now = time.monotonic()
+            # 2) load state
+            ts = []
+            try:
+                if os.path.exists(state_path):
+                    with open(state_path, "r", encoding="utf-8") as sf:
+                        obj = json.load(sf)
+                        if isinstance(obj, list):
+                            ts = [float(x) for x in obj]
+            except Exception:
+                ts = []
+
+            # 3) keep within window
+            window = _UNIPROT_RL_WINDOW
+            rate = _UNIPROT_RL_RATE
+            ts = [t for t in ts if (now - t) < window]
+
+            if len(ts) < rate:
+                ts.append(now)
+                # 4) save state
+                try:
+                    with open(state_path, "w", encoding="utf-8") as sf:
+                        json.dump(ts, sf)
+                finally:
+                    fcntl.flock(lockf.fileno(), fcntl.LOCK_UN)
+                return
+
+            # need wait
+            oldest = min(ts) if ts else now
+            wait_s = window - (now - oldest)
+            wait_s = max(float(wait_s), 0.001)
+
+            # unlock then sleep
+            fcntl.flock(lockf.fileno(), fcntl.LOCK_UN)
+
+        time.sleep(wait_s)
 
 
 # =====================================
@@ -16,6 +86,9 @@ def uniprot_query(query, max_sleep=30, max_retries_per_item=5, k=5):
 
     for _ in range(max_retries_per_item):
         try:
+            # 全局（跨进程）限流：1 秒最多 5 个请求（所有进程合计）
+            _uniprot_global_rate_limit()
+
             r = requests.get(base_url, params=params, timeout=10)
 
             if r.status_code in (429, 500, 502, 503, 504):
@@ -112,238 +185,3 @@ def search_uniprot(query, k=30, max_retries_per_item=5, max_sleep=30):
         )
     return hits
 
-
-# =====================================
-# Extract species from relation (ALL META INCLUDED)
-# =====================================
-def extract_species_from_relation(rel):
-    """
-    Species resolution priority:
-    1) entity.meta
-    2) relation.context (+ context.meta)
-    3) relation.components + relation.target (+ their meta)
-    """
-
-    # ---- collect relation-level species (order matters) ----
-    rel_species = []
-
-    # ---------- 1. context (+ meta) ----------
-    for c in rel.get("context", []):
-        # context itself
-        if c.get("type") == "species" and c.get("name"):
-            rel_species.append(c["name"])
-
-        # context.meta
-        for m in c.get("meta", []):
-            if m.get("type") == "species" and m.get("name"):
-                rel_species.append(m["name"])
-
-    # ---------- 2. components + target (+ meta) ----------
-    for field in ("components", "target"):
-        for ent in rel.get(field, []):
-            # entity itself
-            if ent.get("type") == "species" and ent.get("name"):
-                rel_species.append(ent["name"])
-
-            # entity.meta
-            for m in ent.get("meta", []):
-                if m.get("type") == "species" and m.get("name"):
-                    rel_species.append(m["name"])
-
-    # ---- deduplicate but keep order ----
-    seen = set()
-    rel_species = [x for x in rel_species if not (x in seen or seen.add(x))]
-
-    # ---------- entity-level resolver ----------
-    def _inner(ent):
-        # 1️⃣ entity.meta has highest priority
-        for m in ent.get("meta", []):
-            if m.get("type") == "species" and m.get("name"):
-                return m["name"]
-
-        # 2️⃣ fallback to relation-level species
-        if rel_species:
-            return rel_species[0]
-
-        return None
-
-    return _inner
-
-
-# =====================================
-# Collect gene/protein names
-# =====================================
-def collect_gene_protein(ent, get_species, needed_keys):
-    if ent.get("type") in ("gene", "protein"):
-        nm = ent.get("name")
-        if nm:
-            sp = get_species(ent)
-            needed_keys.add((nm, sp, ent.get("type")))
-
-    for m in ent.get("meta", []):
-        if m.get("type") in ("gene", "protein"):
-            nm = m.get("name")
-            if nm:
-                sp = get_species(m)
-                needed_keys.add((nm, sp, m.get("type")))
-
-
-# =====================================
-# NEW: MAIN FUNCTION that reads 2 files
-# =====================================
-def process_one_folder_get_uniprot_id(
-    folder,
-    relation_file,
-    species_file,
-    output_file,
-    top_candidates=5,
-    max_retries_per_item=5,
-):
-    pmid = os.path.basename(folder)
-
-    # ------------- load relation.json --------------
-    try:
-        with open(os.path.join(folder, relation_file), "r", encoding="utf-8") as f:
-            rel_data = json.load(f)
-    except Exception:
-        return None, [{"type": "status", "name": f"{pmid} (relation load error)"}]
-
-    relations = rel_data.get("relations", [])
-
-    # ------------- load taxon_map --------------
-    try:
-        with open(os.path.join(folder, species_file), "r", encoding="utf-8") as f:
-            sp_data = json.load(f)
-    except Exception:
-        return None, [{"type": "status", "name": f"{pmid} (species load error)"}]
-
-    # ------------------------------------------------
-    # 1️⃣ build best_species map (LLM-resolved taxonomy)
-    # ------------------------------------------------
-    best_species = {}  # raw name → resolved taxonomy name
-    for item in sp_data.get("taxon_map", []):
-        nm = item.get("name")
-        best = item.get("llm_best_match")
-        if nm and best:
-            best_species[nm] = best.get("name")
-
-    # ------------------------------------------------
-    # 2️⃣ collect document-level species from ALL relations
-    # ------------------------------------------------
-    doc_species = []
-    for block in relations:
-        for rel in block.get("rel_from_this_sent", []):
-            get_sp = extract_species_from_relation(rel)
-            sp = get_sp({})  # trick: force relation-level fallback
-            if sp:
-                doc_species.append(sp)
-
-    # 去重但保序
-    seen = set()
-    doc_species = [x for x in doc_species if not (x in seen or seen.add(x))]
-
-    # document-level fallback species（raw name）
-    doc_level_species = doc_species[0] if doc_species else None
-
-    # ------------------------------------------------
-    # 3️⃣ collect gene/protein entities
-    # ------------------------------------------------
-    needed = set()
-
-    for block in relations:
-        for rel in block.get("rel_from_this_sent", []):
-            get_sp = extract_species_from_relation(rel)
-            for field in ("components", "target", "context"):
-                for ent in rel.get(field, []):
-                    collect_gene_protein(ent, get_sp, needed)
-
-    # ------------------------------------------------
-    # 4️⃣ unify species with fallback
-    # ------------------------------------------------
-    filtered_items = []
-
-    for nm, sp, etype in needed:
-        species_final = None
-
-        # case 1: entity/relation-level species + resolved taxonomy
-        if sp and sp in best_species:
-            species_final = best_species[sp]
-
-        # case 2: entity-level species but no mapping
-        elif sp:
-            species_final = sp
-
-        # case 3: fallback to document-level species
-        elif doc_level_species:
-            species_final = best_species.get(doc_level_species, doc_level_species)
-
-        # else: species_final stays None (global UniProt search)
-
-        filtered_items.append((nm, species_final, etype))
-
-    if not filtered_items:
-        out = {"pmid": pmid, "uniprot_map": []}
-        with open(os.path.join(folder, output_file), "w", encoding="utf-8") as fw:
-            json.dump(out, fw, ensure_ascii=False, indent=2)
-        return out, [
-            {
-                "type": "status",
-                "name": f"{pmid} (no gene/protein after species filtering)",
-            }
-        ]
-
-    # ------------------------------------------------
-    # 5️⃣ UniProt search
-    # ------------------------------------------------
-    uniprot_map = []
-    judge = False
-
-    for name, species, etype in filtered_items:
-        try:
-            res = uniprot_query(
-                name,
-                species,
-                max_retries_per_item=max_retries_per_item,
-                top_k=top_candidates,
-            )
-            hits_raw = res.get("results") or []
-        except Exception:
-            hits_raw = []
-
-        hits = []
-        for rank, entry in enumerate(hits_raw, start=1):
-            info = extract_uniprot_info(entry, rank)
-            hits.append(
-                {
-                    "id": info["accession"],
-                    "name": info["accession"],
-                    "description": info["description"],
-                    "rank": rank,
-                }
-            )
-
-        if hits:
-            judge = True
-
-        uniprot_map.append(
-            {
-                "name": name,
-                "species": species,
-                "entity_type": etype,
-                "hits": hits,
-            }
-        )
-
-    # ------------- write output --------------
-    out = {
-        "pmid": pmid,
-        "uniprot_map": uniprot_map,
-    }
-
-    with open(os.path.join(folder, output_file), "w", encoding="utf-8") as fw:
-        json.dump(out, fw, ensure_ascii=False, indent=2)
-
-    return out, [
-        {"type": "status", "name": f"{pmid}"},
-        {"type": "metric", "correct": 1 if judge else 0, "total": 1},
-    ]

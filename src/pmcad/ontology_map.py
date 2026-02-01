@@ -1,3 +1,4 @@
+# src/pmcad/ontology_map.py
 from src.services.llm import LLM
 from src.services.elasticsearch import search_via_curl
 import os
@@ -5,6 +6,7 @@ import json
 from typing import Optional, List, Dict, Any, Tuple, Union, Literal
 from src.pmcad.prompts import get_prompt
 import re
+from src.pmcad.pmidstore import PMIDStore
 
 class Ontology:
     def __init__(self, ontology_type, db_type, use_species : bool = False, key_in_map = None, search_func = None, filename = None, index_name = None, judge_method: Literal["strict", "relaxed", "forced"] = "strict"):
@@ -185,28 +187,32 @@ def search_ontology(
 # =====================================
 CELL_SPECIES_TAG = "__CELL__::"
 
-def load_best_cell_line_species(folder: str, cvcl_ot: "Ontology") -> dict:
+def load_best_cell_line_species(
+    cvcl_ot: "Ontology",
+    *,
+    store: PMIDStore,
+    pmid: Union[int, str],
+) -> dict:
     """
-    从 folder/cvcl_ot.filename 读取：
-      cvcl_ot.key_in_map: [{name, ..., llm_best_match:{..., species: <scientific>}}, ...]
-    构建映射：
+    仅支持 DB 模式（已彻底删除 folder 模式）：
+
+    读取 store.get(pmid, cvcl_ot.filename)，构建：
       best_cell_line_species[cell_name] = scientific_species
     """
     if cvcl_ot is None or not cvcl_ot.filename:
         return {}
 
-    path = os.path.join(folder, cvcl_ot.filename)
-    if not os.path.exists(path):
-        return {}
+    if store is None or pmid is None:
+        raise ValueError("load_best_cell_line_species requires store + pmid (folder mode removed)")
 
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
+    data = store.get(int(pmid), cvcl_ot.filename)
+    if not isinstance(data, dict):
         return {}
 
     m = {}
-    for it in data.get(cvcl_ot.key_in_map, []):
+    for it in (data.get(cvcl_ot.key_in_map, []) or []):
+        if not isinstance(it, dict):
+            continue
         cell = (it.get("name") or "").strip()
         best = it.get("llm_best_match") or {}
         sp = (best.get("species") or "").strip()
@@ -367,98 +373,86 @@ def dedup_needed_by_name_longest_desc(needed: set, use_species: bool):
     return [best[k] for k in sorted(best.keys())]
 
 def process_one_folder_get_db_id(
-    folder: str,
-    input_name: str,
-    ot: Ontology,
+    *,
+    input_name: str = "",
+    ot: Ontology = None,
     species_ot: Ontology = None,
     cvcl_ot: Ontology = None,
+    pmid: Union[int, str],
+    store: PMIDStore,
     **kwargs,
 ):
     """
-    输入 JSON:
-      - pmid
-      - abstract
-      - relations (sentence → rel_from_this_sent)
-
-    输出 JSON（仅）:
-      - pmid
-      - abstract
-      - key_map
+    仅支持 DB 模式：
+      - data = store.get(pmid, input_name)
+      - store.put(pmid, ot.filename, out)
     """
-    pmid = os.path.basename(folder)
-    in_path = os.path.join(folder, input_name)
-    out_path = os.path.join(folder, ot.filename)
+    if ot is None:
+        raise ValueError("ot is None")
+    if store is None:
+        raise ValueError("store is required (folder mode removed)")
 
-    # ---------------------------
-    # 加载输入 JSON
-    # ---------------------------
-    try:
-        with open(in_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
+    pmid_int = int(pmid)
+    pmid_str = str(pmid_int)
+
+    # -------- load input --------
+    data = store.get(pmid_int, input_name)
+    if not isinstance(data, dict):
         return None, [
-            {"type": "error", "msg": f"pmid:{pmid} (load error)"},
+            {"type": "error", "msg": f"pmid:{pmid_str} (load error)"},
             {"type": "metric", "correct": 0, "total": 0},
         ]
 
     abstract = data.get("abstract", "")
     relations = data.get("relations", [])
-    
+
     if ot.use_species and species_ot is None:
         raise ValueError("ot.use_species=True but species_ot is None")
-    
+
     # ------------- load taxon_map --------------
     if ot.use_species:
-        try:
-            with open(os.path.join(folder, species_ot.filename), "r", encoding="utf-8") as f:
-                sp_data = json.load(f)
-        except Exception:
-            return None, [
-                {
-                    "type": "error",
-                    "msg": f"{pmid} (species load error)"
-                }
-            ]
+        sp_data = store.get(pmid_int, species_ot.filename)
+        if not isinstance(sp_data, dict):
+            return None, [{"type": "error", "msg": f"{pmid_str} (species load error)"}]
 
-        # ------------------------------------------------
-        # 1️⃣ build best_species map (LLM-resolved taxonomy)
-        # ------------------------------------------------
-        best_species = {}  # raw name → resolved taxonomy name
+        best_species = {}
         for item in sp_data.get(species_ot.key_in_map, []):
             nm = item.get("name")
             best = item.get("llm_best_match")
             if nm and best:
                 best_species[nm] = best.get("name")
-        # ------------------------------------------------
-        # 1️⃣bis build best_cell_line_species (cell line -> scientific name)
-        # ------------------------------------------------
-        best_cell_line_species = load_best_cell_line_species(folder, cvcl_ot)
 
-        # ------------------------------------------------
-        # 2️⃣ collect document-level species from ALL relations
-        # ------------------------------------------------
+        best_cell_line_species = load_best_cell_line_species(
+            cvcl_ot,
+            store=store,
+            pmid=pmid_int,
+        )
+
+        # collect document-level species
         doc_species = []
         for block in relations:
             for rel in block.get("rel_from_this_sent", []):
-                get_sp = extract_species_from_relation(rel, cvcl_ot=cvcl_ot, best_cell_line_species=best_cell_line_species)
-                sp = get_sp({})  # trick: force relation-level fallback
-                if len(sp) != 0:
+                get_sp = extract_species_from_relation(
+                    rel,
+                    cvcl_ot=cvcl_ot,
+                    best_cell_line_species=best_cell_line_species,
+                )
+                sp = get_sp({})  # relation-level fallback
+                if sp:
                     doc_species.append(sp)
-
-        # 去重但保序
         seen = set()
         doc_species = [x for x in doc_species if not (x in seen or seen.add(x))]
-
-        # document-level fallback species（raw name）
         doc_level_species = doc_species[0] if doc_species else ""
-        
+    else:
+        best_species = {}
+        best_cell_line_species = {}
+        doc_level_species = ""
 
     # ------------------------------------------------
-    # 3️⃣ collect ontology_type entities
+    # collect ontology_type entities
     # ------------------------------------------------
     needed = set()
 
-    # helper: whether this Ontology wants relations
     def _is_relation_ot(ontology_type):
         if isinstance(ontology_type, str):
             return ontology_type == "relation"
@@ -470,79 +464,55 @@ def process_one_folder_get_db_id(
 
     for block in relations:
         for rel in block.get("rel_from_this_sent", []):
-            # keep per-relation species extractor if needed
             if ot.use_species:
-                get_sp = extract_species_from_relation(rel, cvcl_ot=cvcl_ot, best_cell_line_species=best_cell_line_species)
+                get_sp = extract_species_from_relation(
+                    rel, cvcl_ot=cvcl_ot, best_cell_line_species=best_cell_line_species
+                )
 
-            # ---- special handling for relation ontology ----
             if is_relation_ot:
                 rel_obj = rel.get("relation") or {}
                 rname = rel_obj.get("name", "")
                 rdesc = rel_obj.get("description", "")
-
                 if rname:
-                    # pack it into the same "entity-like" shape that collect_type expects
                     ent_relation = {
                         "name": rname,
                         "type": "relation",
                         "description": rdesc,
-                        "meta": [],  # relation itself usually has no meta
+                        "meta": [],
                     }
+                    # ot.ontology_type 在 Ontology.__init__ 已保证为 list
                     if ot.use_species:
-                        collect_type(
-                            ent=ent_relation,
-                            ontology_type="relation",
-                            needed_keys=needed,
-                            get_species=get_sp,
-                        )
+                        collect_type(ent_relation, ot.ontology_type, needed, get_species=get_sp)
                     else:
-                        collect_type(
-                            ent=ent_relation,
-                            ontology_type="relation",
-                            needed_keys=needed,
-                        )
-                # relation-only mapping时，通常不再去 components/targets/contexts 里抓别的
+                        collect_type(ent_relation, ot.ontology_type, needed)
                 continue
 
-            # ---- default: collect components/targets/contexts ----
             for field in ("components", "targets", "contexts"):
                 for ent in rel.get(field, []):
                     if ot.use_species:
-                        collect_type(
-                            ent=ent,
-                            ontology_type=ot.ontology_type,
-                            needed_keys=needed,
-                            get_species=get_sp,
-                        )
+                        collect_type(ent, ot.ontology_type, needed, get_species=get_sp)
                     else:
-                        collect_type(
-                            ent=ent,
-                            ontology_type=ot.ontology_type,
-                            needed_keys=needed,
-                        )
+                        collect_type(ent, ot.ontology_type, needed)
 
     needed = dedup_needed_by_name_longest_desc(needed, use_species=ot.use_species)
-        
+
     # ------------------------------------------------
-    # 4️⃣ unify species with fallback
+    # unify species with fallback
     # ------------------------------------------------
     filtered_items = []
-
     for item in needed:
         if ot.use_species:
             nm, desc, sp = item
         else:
             nm, desc = item
+            sp = ""
+
         species_final = ""
-
-        # case 1: entity/relation-level species + resolved taxonomy
         if ot.use_species:
-            if len(sp) != 0:
+            if sp:
                 species_final = resolve_species(sp, best_species, best_cell_line_species)
-            elif len(doc_level_species) != 0:
+            elif doc_level_species:
                 species_final = resolve_species(doc_level_species, best_species, best_cell_line_species)
-
-        # else: species_final stays None (global UniProt search)
 
         if ot.use_species:
             filtered_items.append((nm, desc, species_final))
@@ -550,18 +520,12 @@ def process_one_folder_get_db_id(
             filtered_items.append((nm, desc))
 
     if not filtered_items:
-        out = {"pmid": pmid, "abstract": abstract, ot.key_in_map: []}
-        with open(out_path, "w", encoding="utf-8") as fw:
-            json.dump(out, fw, ensure_ascii=False, indent=2)
-        return out, [
-            {
-                "type": "error",
-                "msg": f"{pmid} (no {str(ot.ontology_type)})",
-            }
-        ]
+        out = {"pmid": pmid_str, "abstract": abstract, ot.key_in_map: []}
+        store.put(pmid_int, ot.filename, out)
+        return None, [{"type": "error", "msg": f"{pmid_str} (no {str(ot.ontology_type)})"}]
 
     # ------------------------------------------------
-    # 5️⃣ db search
+    # db search
     # ------------------------------------------------
     final_map = []
     num_hit = 0
@@ -572,14 +536,18 @@ def process_one_folder_get_db_id(
             name, desc, species = item
         else:
             name, desc = item
+            species = ""
+
         query = name
-        if len(desc) != 0:
+        if desc:
             query += f", {desc}"
-        if ot.use_species and len(species) != 0:
+        if ot.use_species and species:
             query += f", {species}"
+
         query = re.sub(r"\([^)]*\)", "", str(query))
-        query = re.sub(r"\[[^\]]*\]", "", query)
-        if ot.use_species == False or (ot.use_species and len(species) != 0):
+        query = re.sub(r"\[[^\]]*\]", "", str(query))
+
+        if (not ot.use_species) or (ot.use_species and species):
             try:
                 hits = ot.search_func(query)
             except Exception:
@@ -590,47 +558,121 @@ def process_one_folder_get_db_id(
         if hits:
             num_hit += 1
         num_total += 1
-        final_map_item = {
-            "name": name,
-            "description": desc,
-        }
+
+        e = {"name": name, "description": desc, "hits": hits}
         if ot.use_species:
-            final_map_item["species"] = species
-        final_map_item["hits"] = hits
+            e["species"] = species
+        final_map.append(e)
 
-        final_map.append(final_map_item)
+    # ------------------------------------------------
+    # merge existing (避免覆盖已有 llm_best_match，例如 convert_failed 写入的)
+    # ------------------------------------------------
+    def _key(e: dict) -> tuple:
+        if ot.use_species:
+            return (
+                (e.get("name") or "").strip(),
+                (e.get("description") or "").strip(),
+                (e.get("species") or "").strip(),
+            )
+        return ((e.get("name") or "").strip(), (e.get("description") or "").strip())
 
-    # ------------- write output --------------
-    out = {
-        "pmid": pmid,
-        "abstract": abstract,
-        ot.key_in_map: final_map,
-    }
+    existing = store.get(pmid_int, ot.filename)
 
-    with open(out_path, "w", encoding="utf-8") as fw:
-        json.dump(out, fw, ensure_ascii=False, indent=2)
+    merged_list = []
+    seen = set()
 
-    return out, [
-        {"type": "status", "name": "success", "description": f"{pmid}"},
+    if isinstance(existing, dict):
+        for old in (existing.get(ot.key_in_map, []) or []):
+            if not isinstance(old, dict):
+                continue
+            k = _key(old)
+            if k in seen:
+                continue
+            seen.add(k)
+            merged_list.append(old)
+
+    for new in final_map:
+        k = _key(new)
+        if k in seen:
+            # 如果已有条目但 hits 为空，就补一下；保留 llm_best_match 等字段
+            for old in merged_list:
+                if _key(old) == k:
+                    if (not old.get("hits")) and new.get("hits"):
+                        old["hits"] = new["hits"]
+                    break
+            continue
+        seen.add(k)
+        merged_list.append(new)
+
+    out = {"pmid": pmid_str, "abstract": abstract, ot.key_in_map: merged_list}
+    store.put(pmid_int, ot.filename, out)
+
+    return None, [
+        {"type": "status", "name": "success", "description": f"{pmid_str}"},
         {"type": "metric", "correct": num_hit, "total": num_total},
     ]
-    
+
 
 def build_selection_prompt(
-    name: str, hits: list, abstract: str, description: str = "", species: str = "", judge_method = "strict"
+    name: str,
+    hits: list,
+    abstract: str,
+    description: str = "",
+    species: str = "",
+    judge_method="strict",
+    relation_example: str = "",
 ) -> str:
     """
-    构建让 LLM 选择最正确 UniProt accession 的 prompt。
+    构建让 LLM 选择最正确 DB id 的 prompt。
+
+    ✅ NEW:
+    - relation_example：额外提供一条“包含该实体的 relation”（或其简化 JSON），辅助 disambiguation
     """
-    hits_text = "\n".join([f"- {h['id']}: {h.get('description', '')}" for h in hits])
+    # -----------------------------
+    # Limit prompt size (approx by chars)
+    # -----------------------------
+    max_hits = 30               # 也可以改小，比如 10/15
+    max_desc_chars = 400        # 每条 description 最多保留多少字符
+    max_hits_text_chars = 8000  # hits_text 总预算（越小越不容易超上下文）
+
+    hits_lines = []
+    budget = max_hits_text_chars
+
+    for h in (hits or [])[:max_hits]:
+        hid = str(h.get("id", "") or "").strip()
+        desc = str(h.get("description", "") or "")
+
+        # 压缩空白，减少无意义 token
+        desc = re.sub(r"\s+", " ", desc).strip()
+
+        # 截断每条描述
+        if len(desc) > max_desc_chars:
+            desc = desc[:max_desc_chars].rstrip() + "..."
+
+        line = f"- {hid}: {desc}".strip()
+
+        # 总预算控制：超了就不再追加更多 hits
+        if budget - (len(line) + 1) < 0:
+            break
+
+        hits_lines.append(line)
+        budget -= (len(line) + 1)
+
+    hits_text = "\n".join(hits_lines)
+
     prompt = get_prompt(f"select_db_id/{judge_method}.txt")
+
     query = f"Name: {name}"
-    if len(description) != 0:
+    if description:
         query += f"\nDescription: {description}"
-    if len(species) != 0:
+    if species:
         query += f"\nSpecies: {species}"
 
-    return prompt.format(query=query, abstract=abstract, hits_text=hits_text)
+    abstract2 = abstract or ""
+    if relation_example:
+        abstract2 = (abstract2 + "\n\n[Relation example containing this entity]\n" + relation_example).strip()
+
+    return prompt.format(query=query, abstract=abstract2, hits_text=hits_text)
 
 
 def normalize_db(s: str):
@@ -654,32 +696,132 @@ def match_llm_output_to_db_id(llm_output: str, hits: list):
 
 
 def process_one_folder_judge_db_id(
-    folder: str, ot: Ontology, llm=None, **kwargs
+    *,
+    ot: Ontology,
+    llm: LLM,
+    input_name: str = "",
+    pmid: Union[int, str],
+    store: PMIDStore,
+    **kwargs,
 ):
+    """
+    仅支持 DB 模式：
+      - data = store.get(pmid, ot.filename)
+      - store.put(pmid, ot.filename, data)
+
+    关键修复：
+    - 如果 entry 已有 llm_best_match（例如 convert_failed 已经写入），则跳过，不要覆盖。
+    """
+    if ot is None:
+        raise ValueError("ot is None")
     if llm is None:
         raise ValueError("llm is None")
-    pmid = os.path.basename(folder)
-    path = os.path.join(folder, ot.filename)
+    if store is None:
+        raise ValueError("store is required (folder mode removed)")
 
-    if not os.path.exists(path):
-        return None, [{"type": "error", "msg": f"skip pmid {pmid} (no file)"}]
+    pmid_int = int(pmid)
+    pmid_str = str(pmid_int)
 
-    # === load JSON ===
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception as e:
-        return None, [
-            {"type": "error", "msg": f"load fail pmid {pmid}"},
-        ]
+    # -------- load mapping json --------
+    data = store.get(pmid_int, ot.filename)
+    if not isinstance(data, dict):
+        return None, [{"type": "error", "msg": f"skip pmid {pmid_str} (no file)"}]
 
     abstract = data.get("abstract", "")
-    db_list = data.get(ot.key_in_map, [])
+    db_list = data.get(ot.key_in_map, []) or []
+    if not isinstance(db_list, list):
+        db_list = []
 
-    total = 0
+    # ✅ 为每个 entry 提供一条“包含该实体的 relation”作为额外上下文
+    ds = None
+    if input_name:
+        ds = store.get(pmid_int, input_name)
+
+    def _relation_example_for(name: str) -> str:
+        """
+        从 ds.relations 中找一条包含该实体 name 的 relation，返回简化 JSON 字符串。
+       ⧖⧖⧖⧖ ✅ 限制 token：这里会递归删除所有字段里的 "description"，避免把大段文本送进 LLM。
+        找不到则返回空串。
+        """
+        if not isinstance(ds, dict):
+            return ""
+        rel_blocks = ds.get("relations") or []
+        if not isinstance(rel_blocks, list):
+            return ""
+
+        ot_types = ot.ontology_type or []
+        if not isinstance(ot_types, list):
+            ot_types = [ot_types]
+        ot_types = set(ot_types)
+
+        def _strip_description(obj):
+            if isinstance(obj, dict):
+                out = {}
+                for k, v in obj.items():
+                    if k == "description":
+                        continue
+                    out[k] = _strip_description(v)
+                return out
+            if isinstance(obj, list):
+                return [_strip_description(x) for x in obj]
+            return obj
+
+        def _ent_name_matches(ent: dict) -> bool:
+            return (ent.get("name") or "").strip() == (name or "").strip()
+
+        def _scan_entity(ent: dict) -> bool:
+            if not isinstance(ent, dict):
+                return False
+            # relation ontology 特判：看 rel["relation"]["name"]
+            if "relation" in ot_types:
+                return False
+            et = ent.get("type")
+            if et in ot_types and _ent_name_matches(ent):
+                return True
+            for m in (ent.get("meta") or []):
+                if _scan_entity(m):
+                    return True
+            return False
+
+        for blk in rel_blocks:
+            for rel in (blk.get("rel_from_this_sent") or []):
+                # relation ontology 特判
+                if "relation" in ot_types:
+                    r = rel.get("relation") or {}
+                    if (r.get("name") or "").strip() == (name or "").strip():
+                        slim = {
+                            "relation": r,
+                            "components": rel.get("components", []),
+                            "targets": rel.get("targets", []),
+                            "contexts": rel.get("contexts", []),
+                        }
+                        return json.dumps(_strip_description(slim), ensure_ascii=False)
+
+                for field in ("components", "targets", "contexts"):
+                    for ent in (rel.get(field) or []):
+                        if _scan_entity(ent):
+                            slim = {
+                                "relation": rel.get("relation", {}),
+                                "components": rel.get("components", []),
+                                "targets": rel.get("targets", []),
+                                "contexts": rel.get("contexts", []),
+                            }
+                            return json.dumps(_strip_description(slim), ensure_ascii=False)
+
+        return ""
+
+    attempted = 0
     correct = 0
+    error_count = 0
 
     for entry in db_list:
+        if not isinstance(entry, dict):
+            continue
+
+        # ✅ 已有 best_match 则不再 judge（避免覆盖 convert_failed 的结果）
+        if entry.get("llm_best_match") is not None:
+            continue
+
         name = entry.get("name", "")
         description = entry.get("description", "")
         species = entry.get("species", "")
@@ -690,111 +832,102 @@ def process_one_folder_judge_db_id(
             continue
 
         prompt = build_selection_prompt(
-            name=name, description=description, species=species, hits=hits, abstract=abstract, judge_method=ot.judge_method
+            name=name,
+            description=description,
+            species=species,
+            hits=hits,
+            abstract=abstract,
+            judge_method=ot.judge_method,
+            relation_example=_relation_example_for(name),
         )
 
+        attempted += 1
         try:
-            llm_output = llm.query(prompt).strip()
+            llm_output = llm.query(prompt)
         except Exception as e:
             llm_output = f"ERROR: {e}"
             entry["llm_raw_output"] = llm_output
             entry["llm_best_match"] = None
+            error_count += 1
             continue
 
-        # ---- 匹配 accession ----
         best_hit = match_llm_output_to_db_id(llm_output, hits)
-
         entry["llm_raw_output"] = llm_output
         entry["llm_best_match"] = best_hit
-
         if best_hit is not None:
             correct += 1
-        total += 1
 
     data[ot.key_in_map] = db_list
+    store.put(pmid_int, ot.filename, data)
 
-    out_path = os.path.join(folder, ot.filename)
-    with open(out_path, "w", encoding="utf-8") as fw:
-        json.dump(data, fw, ensure_ascii=False, indent=2)
-
-    return data, [
-        {"type": "status", "name": "success", "description": f"ok pmid {pmid}"},
-        {"type": "metric", "name": "judge", "correct": correct, "total": total},
+    return None, [
+        {"type": "status", "name": "success", "description": f"ok pmid {pmid_str}"},
+        {"type": "metric", "name": "judge", "correct": correct, "total": attempted},
+        {"type": "metric", "name": "llm_error", "correct": error_count, "total": attempted},
     ]
 
 def process_one_folder_apply_llm_best(
-    folder: str,
+    *,
+    pmid: Union[int, str],
+    store: PMIDStore,
     input_name: str,
     output_name: str,
     ot_list: List["Ontology"],
     species_ot: Optional["Ontology"] = None,
     cvcl_ot: Optional["Ontology"] = None,
+    **kwargs,
 ):
     """
-    使用各 ontology 的 llm_best_match 回写 entity（权威映射阶段）
-
-    ✅ 核心保证：
-    1) entity & meta entity 都按同样规则映射（命中 ontology 但无 best -> 删除）
-    2) species 解析逻辑与 get_db_id/judge 对齐：
-       - entity.meta species 优先
-       - relation-level fallback
-       - cell-line fallback
-       - document-level fallback（全局兜底）
-    3) 匹配与 judge 对齐：优先 (name, species_final)，并做安全 fallback
-    4) 回写字段：id / name / description（保留其它字段）
+    仅支持 DB 模式（folder 模式删除）：
+      - 读：store.get(pmid, input_name) / store.get(pmid, ot.filename)
+      - 写：store.put(pmid, output_name, data)
     """
+    if store is None:
+        raise ValueError("store is required (folder mode removed)")
 
-    pmid = os.path.basename(folder)
-    in_path = os.path.join(folder, input_name)
-    out_path = os.path.join(folder, output_name)
+    pmid_int = int(pmid)
+    pmid_str = str(pmid_int)
 
     # -----------------------------
     # 0) load relation file
     # -----------------------------
-    if not os.path.exists(in_path):
-        return None, [{"type": "error", "msg": f"{pmid} missing input file: {input_name}"}]
-
-    try:
-        with open(in_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception as e:
-        return None, [{"type": "error", "msg": f"{pmid} load fail: {repr(e)}"}]
+    data = store.get(pmid_int, input_name)
+    if not isinstance(data, dict):
+        return None, [{"type": "error", "msg": f"{pmid_str} missing input: {input_name}"}]
 
     relations = data.get("relations", [])
     if not relations:
-        with open(out_path, "w", encoding="utf-8") as fw:
-            json.dump(data, fw, ensure_ascii=False, indent=2)
-        return data, [{"type": "status", "name": "no_relations"}]
+        store.put(pmid_int, output_name, data)
+        return None, [{"type": "status", "name": "no_relations"}]
 
     # -----------------------------
-    # 1) load species maps (for resolve_species + optional id mapping)
+    # 1) load species maps
     # -----------------------------
-    best_species_name_map: Dict[str, str] = {}   # raw -> scientific
-    best_species_hit_map: Dict[str, Dict[str, Any]] = {}  # raw -> best_hit(dict)
+    best_species_name_map: Dict[str, str] = {}
+    best_species_hit_map: Dict[str, Dict[str, Any]] = {}
 
     best_cell_line_species: Dict[str, str] = {}
-    if cvcl_ot:
-        best_cell_line_species = load_best_cell_line_species(folder, cvcl_ot)
 
-    if species_ot:
-        sp_path = os.path.join(folder, species_ot.filename)
-        if os.path.exists(sp_path):
-            try:
-                with open(sp_path, "r", encoding="utf-8") as f:
-                    sp_data = json.load(f)
-                for it in sp_data.get(species_ot.key_in_map, []):
-                    raw_nm = (it.get("name") or "").strip()
-                    best = it.get("llm_best_match")
-                    if raw_nm and isinstance(best, dict) and best.get("name"):
-                        best_species_name_map[raw_nm] = best.get("name")
-                        best_species_hit_map[raw_nm] = best
-            except Exception:
-                # species map 读失败不硬炸：只是不做 species canonicalize
-                pass
+    if species_ot and species_ot.filename:
+        sp_data = store.get(pmid_int, species_ot.filename)
+        if isinstance(sp_data, dict):
+            for it in sp_data.get(species_ot.key_in_map, []):
+                raw_nm = (it.get("name") or "").strip()
+                best = it.get("llm_best_match")
+                if raw_nm and isinstance(best, dict) and best.get("name"):
+                    best_species_name_map[raw_nm] = best.get("name")
+                    best_species_hit_map[raw_nm] = best
+
+    # ✅ 潜在问题修复：加载 cell_line -> species，用于 extract_species_from_relation 的 cell 兜底
+    if cvcl_ot and cvcl_ot.filename:
+        best_cell_line_species = load_best_cell_line_species(
+            cvcl_ot,
+            store=store,
+            pmid=pmid_int,
+        )
 
     # -----------------------------
     # 2) compute document-level fallback species (raw)
-    #    与 get_db_id 完全一致：对每个 relation 取 get_sp({}) 结果
     # -----------------------------
     def compute_doc_level_species_raw() -> str:
         doc_species = []
@@ -805,24 +938,18 @@ def process_one_folder_apply_llm_best(
                     cvcl_ot=cvcl_ot,
                     best_cell_line_species=best_cell_line_species,
                 )
-                sp = (get_sp({}) or "").strip()  # 强制 relation-level fallback
+                sp = (get_sp({}) or "").strip()
                 if sp:
                     doc_species.append(sp)
 
-        # 去重保序
         seen = set()
-        doc_species = [x for x in doc_species if not (x in seen or seen.add(x))]
-        return doc_species[0] if doc_species else ""
+        doc_species2 = [x for x in doc_species if not (x in seen or seen.add(x))]
+        return doc_species2[0] if doc_species2 else ""
 
     doc_level_species_raw = compute_doc_level_species_raw()
 
     # -----------------------------
     # 3) build ontology lookup tables from each ot.filename (judge输出)
-    #    lut_exact:
-    #      - use_species=False: (name,) -> best
-    #      - use_species=True : (name, species_final) -> best
-    #    lut_by_name (only for use_species=True):
-    #      name -> list[(species_final, best)]
     # -----------------------------
     ot_lookup: Dict["Ontology", Dict[str, Any]] = {}
 
@@ -830,14 +957,8 @@ def process_one_folder_apply_llm_best(
         if not ot.filename:
             continue
 
-        path = os.path.join(folder, ot.filename)
-        if not os.path.exists(path):
-            continue
-
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                mdata = json.load(f)
-        except Exception:
+        mdata = store.get(pmid_int, ot.filename)
+        if not isinstance(mdata, dict):
             continue
 
         lut_exact: Dict[Tuple[str, ...], Dict[str, Any]] = {}
@@ -859,35 +980,19 @@ def process_one_folder_apply_llm_best(
                 key = (name,)
                 lut_exact[key] = best
 
-        ot_lookup[ot] = {
-            "exact": lut_exact,
-            "by_name": lut_by_name,  # 空dict也行
-        }
+        ot_lookup[ot] = {"exact": lut_exact, "by_name": lut_by_name}
 
     # -----------------------------
-    # 4) helpers: species resolution (align get_db_id)
+    # 4) helpers
     # -----------------------------
     def resolve_species_final_for_entity(ent: Dict[str, Any], get_sp_func) -> str:
-        """
-        产生用于匹配映射表的 species_final（scientific）
-        与 get_db_id 对齐：
-          1) entity.meta 中 species 优先（由 get_sp_func 体现）
-          2) relation-level fallback
-          3) cell-line fallback
-          4) document-level fallback
-        """
         sp_raw = (get_sp_func(ent) or "").strip()
         if not sp_raw and doc_level_species_raw:
             sp_raw = doc_level_species_raw
-
         if not sp_raw:
             return ""
-
         return (resolve_species(sp_raw, best_species_name_map, best_cell_line_species) or "").strip()
 
-    # -----------------------------
-    # 5) helpers: lookup best (match judge)
-    # -----------------------------
     def lookup_best_for_ot(ot: "Ontology", name: str, species_final: str) -> Optional[Dict[str, Any]]:
         info = ot_lookup.get(ot)
         if not info:
@@ -899,20 +1004,15 @@ def process_one_folder_apply_llm_best(
         if not ot.use_species:
             return lut_exact.get((name,))
 
-        # use_species=True
-        # 1) exact match
         best = lut_exact.get((name, species_final))
         if best is not None:
             return best
 
-        # 2) fallback to (name, "")
         best = lut_exact.get((name, ""))
         if best is not None:
             return best
 
-        # 3) safe fallback: if this name has exactly ONE candidate species in mapping file, use it
         cands = lut_by_name.get(name, [])
-        # 去重 species 候选
         uniq = {}
         for sp, b in cands:
             if (sp or "") not in uniq:
@@ -923,110 +1023,12 @@ def process_one_folder_apply_llm_best(
         return None
 
     # -----------------------------
-    # 6) core mapper: map one entity (and its meta recursively)
+    # 5) core mapper
     # -----------------------------
-    def map_one_entity(ent: Dict[str, Any], get_sp_func) -> Optional[Dict[str, Any]]:
-        """
-        返回：
-          - dict: 映射后 entity
-          - None: 该 entity 应被删除
-        规则：
-          - 若 ent.type 命中某个 ot.ontology_type：
-                - 找到 best -> 回写 id/name/description + 映射其 meta
-                - 找不到 best -> 删除 ent
-          - 若不命中任何 ot -> 只映射它的 meta（meta 若命中且无 best 仍会被删）
-        """
-        nonlocal attempted, mapped_success
-        if not isinstance(ent, dict):
-            return None
-
-        etype = ent.get("type")
-        name = (ent.get("name") or "").strip()
-        if not name or not etype:
-            return None
-
-        # 先递归处理 meta（无论 entity 本体是否命中 ontology）
-        meta_list = ent.get("meta", [])
-        if not isinstance(meta_list, list):
-            meta_list = []
-
-        new_meta = []
-        for m in meta_list:
-            if not isinstance(m, dict):
-                continue
-            mapped_m = map_one_meta_entity(m, get_sp_func)
-            if mapped_m is not None:
-                new_meta.append(mapped_m)
-
-        # 默认先保留 meta 更新
-        ent2 = dict(ent)
-        ent2["meta"] = new_meta
-
-        # 处理 species 类型（即使不在 ot_list 里，也尽量 canonicalize 到 scientific）
-        # 这里仅 canonicalize name；id 只有在 best_species_hit_map 命中 raw name 时可写入
-        # if etype == "species":
-        #     raw = name
-        #     sci = best_species_name_map.get(raw, "")
-        #     if sci:
-        #         ent2["name"] = sci
-        #         best_hit = best_species_hit_map.get(raw)
-        #         if isinstance(best_hit, dict) and best_hit.get("id"):
-        #             ent2["id"] = best_hit.get("id")
-        #         # species 一般不需要 description，但你要求 id/name/description 都映射，就不强删字段
-        #     return ent2
-
-        # 看 entity 本体是否命中某个 ontology
-        for ot in ot_list:
-            if etype not in (ot.ontology_type or []):
-                continue
-
-            # 该 entity 被这个 ontology 管辖：必须能映射，否则删除
-            attempted += 1
-            species_final = ""
-            if ot.use_species:
-                species_final = resolve_species_final_for_entity(ent, get_sp_func)
-
-            best = lookup_best_for_ot(ot, name, species_final)
-            if best is None:
-                return None  # ❌ 命中 ontology 但无 best -> 删除
-            mapped_success += 1
-
-            # ✅ 回写 id/name/description
-            ent2["id"] = best.get("id", ent2.get("id"))
-            ent2["name"] = best.get("name") or best.get("id") or ent2.get("name")
-            if "description" in best:
-                ent2["description"] = best.get("description", ent2.get("description", ""))
-
-            # ✅ 若该 ontology 要求 species：规范化 species meta（与 get_db_id 对齐）
-            if ot.use_species and species_final:
-                meta_wo_species = [mm for mm in ent2.get("meta", []) if mm.get("type") != "species"]
-
-                # ✅ 先构造，再走一次 meta 映射（让 taxon 补齐 id）
-                sp_meta = {"name": species_final, "type": "species", "description": ""}
-
-                sp_meta_mapped = map_one_meta_entity(sp_meta, get_sp_func)
-                if sp_meta_mapped is None:
-                    # 理论上不该发生（除非 taxon 没有 best），那就退化成裸 meta
-                    sp_meta_mapped = {"name": species_final, "type": "species", "description": ""}
-
-                # ✅ species 按你 schema：不需要 description（建议删掉）
-                sp_meta_mapped.pop("description", None)
-
-                meta_wo_species.append(sp_meta_mapped)
-                ent2["meta"] = meta_wo_species
-
-            return ent2
-
-        # 不命中任何 ontology：仅 meta 已被映射，entity 本体原样保留（但 meta 已清洗）
-        return ent2
+    mapped_success = 0
+    attempted = 0
 
     def map_one_meta_entity(m: Dict[str, Any], get_sp_func) -> Optional[Dict[str, Any]]:
-        """
-        meta entity 与主 entity 同规则：
-          - 命中 ontology 但没 best -> 删除这个 meta entry
-          - 命中且有 best -> 回写 id/name/description，并递归处理它自己的 meta（如果有）
-          - 不命中任何 ot -> 原样保留（但递归清洗其 meta）
-        """
         nonlocal attempted, mapped_success
         if not isinstance(m, dict):
             return None
@@ -1036,7 +1038,6 @@ def process_one_folder_apply_llm_best(
         if not mtype or not mname:
             return None
 
-        # 递归清洗 meta.meta（通常不会有，但允许）
         mm_list = m.get("meta", [])
         if not isinstance(mm_list, list):
             mm_list = []
@@ -1051,18 +1052,6 @@ def process_one_folder_apply_llm_best(
         m2 = dict(m)
         m2["meta"] = new_mm
 
-        # species meta 特判：尽量 canonicalize
-        # if mtype == "species":
-        #     raw = mname
-        #     sci = best_species_name_map.get(raw, "")
-        #     if sci:
-        #         m2["name"] = sci
-        #         best_hit = best_species_hit_map.get(raw)
-        #         if isinstance(best_hit, dict) and best_hit.get("id"):
-        #             m2["id"] = best_hit.get("id")
-        #     return m2
-
-        # 命中 ontology 的 meta：必须能映射
         for ot in ot_list:
             if mtype not in (ot.ontology_type or []):
                 continue
@@ -1074,7 +1063,10 @@ def process_one_folder_apply_llm_best(
 
             best = lookup_best_for_ot(ot, mname, species_final)
             if best is None:
-                return None  # ❌ 命中 ontology 但无 best -> 删除 meta
+                # ✅ relation ontology 特例：relation 没映射成功也要保留（不删除该实体）
+                if mtype == "relation":
+                    return m2
+                return None
             mapped_success += 1
 
             m2["id"] = best.get("id", m2.get("id"))
@@ -1089,7 +1081,6 @@ def process_one_folder_apply_llm_best(
                 sp_meta_mapped = map_one_meta_entity(sp_meta, get_sp_func)
                 if sp_meta_mapped is None:
                     sp_meta_mapped = {"name": species_final, "type": "species", "description": ""}
-
                 sp_meta_mapped.pop("description", None)
 
                 meta_wo_species.append(sp_meta_mapped)
@@ -1097,14 +1088,73 @@ def process_one_folder_apply_llm_best(
 
             return m2
 
-        # 不命中任何 ontology：保留（但 meta.meta 已清洗）
         return m2
 
+    def map_one_entity(ent: Dict[str, Any], get_sp_func) -> Optional[Dict[str, Any]]:
+        nonlocal attempted, mapped_success
+        if not isinstance(ent, dict):
+            return None
+
+        etype = ent.get("type")
+        name = (ent.get("name") or "").strip()
+        if not name or not etype:
+            return None
+
+        meta_list = ent.get("meta", [])
+        if not isinstance(meta_list, list):
+            meta_list = []
+        new_meta = []
+        for m in meta_list:
+            if not isinstance(m, dict):
+                continue
+            mapped_m = map_one_meta_entity(m, get_sp_func)
+            if mapped_m is not None:
+                new_meta.append(mapped_m)
+
+        ent2 = dict(ent)
+        ent2["meta"] = new_meta
+
+        for ot in ot_list:
+            if etype not in (ot.ontology_type or []):
+                continue
+
+            attempted += 1
+            species_final = ""
+            if ot.use_species:
+                species_final = resolve_species_final_for_entity(ent, get_sp_func)
+
+            best = lookup_best_for_ot(ot, name, species_final)
+            if best is None:
+                # ✅ relation ontology 特例：relation 没映射成功也要保留（不删除该实体）
+                if etype == "relation":
+                    return ent2
+                return None
+            mapped_success += 1
+
+            ent2["id"] = best.get("id", ent2.get("id"))
+            ent2["name"] = best.get("name") or best.get("id") or ent2.get("name")
+            if "description" in best:
+                ent2["description"] = best.get("description", ent2.get("description", ""))
+
+            if ot.use_species and species_final:
+                meta_wo_species = [mm for mm in ent2.get("meta", []) if mm.get("type") != "species"]
+
+                sp_meta = {"name": species_final, "type": "species", "description": ""}
+                sp_meta_mapped = map_one_meta_entity(sp_meta, get_sp_func)
+                if sp_meta_mapped is None:
+                    sp_meta_mapped = {"name": species_final, "type": "species", "description": ""}
+                sp_meta_mapped.pop("description", None)
+
+                meta_wo_species.append(sp_meta_mapped)
+                ent2["meta"] = meta_wo_species
+
+            return ent2
+
+        return ent2
+
     # -----------------------------
-    # 7) apply mapping to all relations/entities
+    # 6) apply mapping to all relations/entities
     # -----------------------------
-    mapped_success = 0
-    attempted = 0
     for block in relations:
         for rel in block.get("rel_from_this_sent", []):
             get_sp = extract_species_from_relation(
@@ -1112,6 +1162,26 @@ def process_one_folder_apply_llm_best(
                 cvcl_ot=cvcl_ot,
                 best_cell_line_species=best_cell_line_species,
             )
+
+            # ✅ 单独处理 relation ontology：映射失败也保留原 relation
+            rel_obj = rel.get("relation")
+            if isinstance(rel_obj, dict) and (rel_obj.get("name") or "").strip():
+                rel_ent = {
+                    "type": "relation",
+                    "name": (rel_obj.get("name") or "").strip(),
+                    "description": rel_obj.get("description", "") or "",
+                    "meta": [],
+                }
+                rel_ent2 = map_one_entity(rel_ent, get_sp)
+                if isinstance(rel_ent2, dict):
+                    rel_obj2 = dict(rel_obj)
+                    if rel_ent2.get("id"):
+                        rel_obj2["id"] = rel_ent2.get("id")
+                    if rel_ent2.get("name"):
+                        rel_obj2["name"] = rel_ent2.get("name")
+                    if "description" in rel_ent2:
+                        rel_obj2["description"] = rel_ent2.get("description", rel_obj2.get("description", ""))
+                    rel["relation"] = rel_obj2
 
             for field in ("components", "targets", "contexts"):
                 ents = rel.get(field, [])
@@ -1129,19 +1199,20 @@ def process_one_folder_apply_llm_best(
                 rel[field] = new_ents
 
     # -----------------------------
-    # 8) write output
+    # 7) write output
     # -----------------------------
     data.setdefault("_apply_llm_best_report", {})
-    data["_apply_llm_best_report"].update({
-        "pmid": pmid,
-        "doc_level_species_raw": doc_level_species_raw,
-        "mode": "apply_llm_best_with_meta_and_species_alignment",
-    })
+    data["_apply_llm_best_report"].update(
+        {
+            "pmid": pmid_str,
+            "doc_level_species_raw": doc_level_species_raw,
+            "mode": "apply_llm_best_with_meta_and_species_alignment",
+        }
+    )
 
-    with open(out_path, "w", encoding="utf-8") as fw:
-        json.dump(data, fw, ensure_ascii=False, indent=2)
+    store.put(pmid_int, output_name, data)
 
-    return data, [
-        {"type": "status", "name": "success", "description": f"{pmid} mapped"},
+    return None, [
+        {"type": "status", "name": "success", "description": f"{pmid_str} mapped"},
         {"type": "metric", "name": "success", "correct": mapped_success, "total": attempted},
     ]
