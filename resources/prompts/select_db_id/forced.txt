@@ -1,0 +1,27 @@
+Below is a QUERY TERM and its DESCRIPTION, followed by CANDIDATE TERMS.
+
+Your task:
+- Select the **single most relevant term** from the candidates with respect to the query.
+- You MUST select one candidate if any are provided.
+
+SELECTION CRITERIA:
+- Choose the term that is most closely related in meaning to the query.
+- Exact semantic equivalence is NOT required.
+- Structural, functional, or attribute-level relevance is acceptable.
+- If multiple candidates are plausible, choose the most specific one.
+
+OUTPUT FORMAT:
+- ONLY output EXACTLY ONE STRING:
+    - a ID (for example: SO:0000167), which MUST be one of the candidate IDs listed below,
+- Do NOT output explanations, extra text, or quotes.
+
+QUERY:
+{query}
+
+ABSTRACT:
+\"\"\"{abstract}\"\"\"
+
+CANDIDATE TERMS:
+{hits_text}
+
+Your answer:

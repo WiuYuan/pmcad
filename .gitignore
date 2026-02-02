@@ -6,10 +6,9 @@ build/
 .vscode/
 **/__pycache__/
 **/*.pyc
+*.so
 *.json
-*.txt
 *.tsv
-_*
 *.log
 *.csv
 *.jsonl
